@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.appalive">
+
+    <application
+        android:allowBackup="false"
+        android:supportsRtl="true">
+
+        <!-- Tell LSPosed this is an Xposed module -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+
+        <!-- Description shown in LSPosed manager -->
+        <meta-data
+            android:name="xposeddescription"
+            android:value="Disable 'excessive cpu' background app kills" />
+
+        <!-- Minimum LSPosed API version (93 = 1.8.0+) -->
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+
+        <!-- Hook into the system_server process (where ActivityManager runs) -->
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/scope" />
+
+    </application>
+
+</manifest>
