@@ -1,8 +1,3 @@
-input:  tell me more about LSPosed/Xposed hook, I have installed magisk and lsposed
-
-deepseek-v4-pro: The user wants to know more about how to create an LSPosed module to hook into the Android framework and disable the excessive CPU killing behavior. Let me give them a practical, step-by-step guide for creating an LSPosed module that hooks `checkExcessivePowerUsageLPr` to always return false.
-
-Since they have Magisk and LSPosed already installed, I'll give them a complete, ready-to-compile LSPosed module.You can create a minimal LSPosed module that hooks `checkExcessivePowerUsageLPr` and forces it to always return `false`. Here's the complete module:
 
 ---
 
@@ -168,92 +163,149 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public class MainHook implements IXposedHookLoadPackage {
 
-    private static final String TAG = "CpuKillDisabler";
-    private static final String AMS = "com.android.server.am";
+    private static final String TAG = "AppAlive";
+    private static final String AMS = "com.android.server.am.ActivityManagerService";
+
+    // AOSP source code https://cs.android.com/android/platform/superproject/+/android-latest-release:frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java;l=602?q=ActivityManagerService&sq=
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-        // Only hook system_server (where AMS runs)
-        if (!"android".equals(lpparam.packageName)) {
-            return;
-        }
+        if (!"android".equals(lpparam.packageName)) return;
 
         XposedBridge.log(TAG + ": Loaded into system_server");
 
         // ─── Hook 1: checkExcessivePowerUsageLPr → always return false ───
         try {
             XposedHelpers.findAndHookMethod(
-                AMS + ".OomAdjuster",
-                lpparam.classLoader,
-                "checkExcessivePowerUsageLPr",
-                long.class,      // uptimeSince
-                boolean.class,   // doCpuKills
-                long.class,      // cpuTimeUsed
-                String.class,    // processName
-                String.class,    // shortString
-                int.class,       // cpuLimit
-                AMS + ".ProcessRecord",  // app
-                new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        // Block the kill by returning false immediately
-                        param.setResult(false);
+                    AMS,
+                    lpparam.classLoader,
+                    "checkExcessivePowerUsageLPr",
+                    long.class,
+                    boolean.class,
+                    long.class,
+                    String.class,
+                    String.class,
+                    int.class,
+                    "com.android.server.am.ProcessRecord",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            param.setResult(false);
+                        }
                     }
-                }
             );
             XposedBridge.log(TAG + ": Hooked checkExcessivePowerUsageLPr ✓");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to hook checkExcessivePowerUsageLPr: " + t.getMessage());
+            XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());
         }
 
-        // ─── Hook 2: updateAppProcessCpuTimeLPr → skip the entire method ───
-        // This is a backup — if Hook 1 fails, this stops it even earlier
+        // ─── Hook 2: updateAppProcessCpuTimeLPr → set doCpuKills = false ───
         try {
             XposedHelpers.findAndHookMethod(
-                AMS + ".OomAdjuster",
-                lpparam.classLoader,
-                "updateAppProcessCpuTimeLPr",
-                long.class,      // uptimeSince
-                boolean.class,   // doCpuKills
-                long.class,      // checkDur
-                int.class,       // cpuLimit
-                AMS + ".ProcessRecord",  // app
-                new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        // Set doCpuKills = false (2nd parameter)
-                        param.args[1] = false;
+                    AMS,
+                    lpparam.classLoader,
+                    "updateAppProcessCpuTimeLPr",
+                    long.class,
+                    boolean.class,
+                    long.class,
+                    int.class,
+                    "com.android.server.am.ProcessRecord",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            param.args[1] = false;
+                        }
                     }
-                }
             );
             XposedBridge.log(TAG + ": Hooked updateAppProcessCpuTimeLPr ✓");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to hook updateAppProcessCpuTimeLPr: " + t.getMessage());
+            XposedBridge.log(TAG + ": updateAppProcessCpuTimeLPr FAILED: " + t.getMessage());
         }
 
-        // ─── Hook 3: sendKillExcessiveCpuProfilingTrigger → no-op ───
-        // Prevents profiling triggers that happen even if we block the kill
+        // ─── Hook 3:  updatePhantomProcessCpuTimeLPr → set doCpuKills = false ───
         try {
             XposedHelpers.findAndHookMethod(
-                AMS + ".ActivityManagerService",
-                lpparam.classLoader,
-                "sendKillExcessiveCpuProfilingTrigger",
-                int.class,       // uid
-                String.class,    // packageName
-                new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        param.setResult(null);
+                    AMS,
+                    lpparam.classLoader,
+                    "updatePhantomProcessCpuTimeLPr",
+                    long.class,
+                    boolean.class,
+                    long.class,
+                    int.class,
+                    "com.android.server.am.ProcessRecord",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            param.args[1] = false;
+                        }
                     }
-                }
             );
-            XposedBridge.log(TAG + ": Hooked sendKillExcessiveCpuProfilingTrigger ✓");
+            XposedBridge.log(TAG + ": Hooked updatePhantomProcessCpuTimeLPr ✓");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to hook profiling trigger: " + t.getMessage());
+            XposedBridge.log(TAG + ": updatePhantomProcessCpuTimeLPr FAILED: " + t.getMessage());
         }
+
+
+        // ─── Hook 4: sendKillExcessiveCpuProfilingTrigger → no-op ───
+        // this may in com.android.server.am.AppProfiler in android 11-15, different OEM may have different parameters
+        Class<?> amsClass = XposedHelpers.findClass("com.android.server.am.ActivityManagerService",lpparam.classLoader);
+        for (java.lang.reflect.Method method: amsClass.getDeclaredMethods()) {
+            if (method.getName().equals("sendKillExcessiveCpuProfilingTrigger")){
+
+                try {
+                    XposedHelpers.findAndHookMethod(
+                            amsClass,
+                            method.getName(),
+                            method.getParameterTypes(),
+                            new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) {
+                                    param.setResult(null);
+                                }
+                            }
+                    );
+                    XposedBridge.log(TAG + ": Hooked sendKillExcessiveCpuProfilingTrigger ✓");
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + ": sendKillExcessiveCpuProfilingTrigger FAILED: " + t.getMessage());
+                }
+
+            }
+        }
+
+//        try {
+//            XposedHelpers.findAndHookMethod(
+//                    AMS,
+//                    lpparam.classLoader,
+//                    "sendKillExcessiveCpuProfilingTrigger",
+//                    int.class,
+//                    String.class,
+//                    new XC_MethodHook() {
+//                        @Override
+//                        protected void beforeHookedMethod(MethodHookParam param) {
+//                            param.setResult(null);
+//                        }
+//                    }
+//            );
+//            XposedBridge.log(TAG + ": Hooked sendKillExcessiveCpuProfilingTrigger ✓");
+//        } catch (Throwable t) {
+//            XposedBridge.log(TAG + ": sendKillExcessiveCpuProfilingTrigger FAILED: " + t.getMessage());
+//        }
     }
 }
+
 ```
+If this **still** fails with `#exact` errors, your ROM's signatures differ from AOSP. Run this discovery snippet first and paste the logcat:
+
+```java
+// Replace handleLoadPackage body temporarily
+Class<?> c = lpparam.classLoader.loadClass(AMS);
+for (Method m : c.getDeclaredMethods()) {
+    String name = m.getName();
+    if (name.contains("Excessive") || name.contains("CpuTime") || name.contains("excessive")) {
+        XposedBridge.log(TAG + ": FOUND → " + name
+                + "(" + java.util.Arrays.toString(m.getParameterTypes()) + ")");
+    }
+}
 
 ---
 
