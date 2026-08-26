@@ -6,7 +6,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
-import android.media.AudioManager;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
@@ -276,6 +275,7 @@ public class MainHook implements IXposedHookLoadPackage {
             return true;
         }
 
+
         CharSequence text = n.extras.getCharSequence(Notification.EXTRA_TEXT);
         if (text == null) {
             return false; // 没有文字内容，不太可能是消息
@@ -352,13 +352,10 @@ public class MainHook implements IXposedHookLoadPackage {
                             "FCM:" + source
                     );
                     lastWake = now;
-                    XposedBridge.log(TAG + ": Screen woken by " + source);
+                    XposedBridge.log("Screen woken (3-param) by " + source);
 
-                    AudioManager am = sSystemContext.getSystemService(AudioManager.class);
-                    if (am.getStreamVolume(AudioManager.STREAM_NOTIFICATION) != 0) {
-                        // 静音模式下只亮屏，不播放声音
-                        playNotificationSound(cl);
-                    }
+                    playNotificationSound(cl);
+
 
                     return;
                 } catch (Throwable t) {
@@ -369,13 +366,9 @@ public class MainHook implements IXposedHookLoadPackage {
                     );
                     lastWake = now;
 
-                    AudioManager am = sSystemContext.getSystemService(AudioManager.class);
-                    if (am.getStreamVolume(AudioManager.STREAM_NOTIFICATION) != 0) {
-                        // 静音模式下只亮屏，不播放声音
-                        playNotificationSound(cl);
-                    }
+                    playNotificationSound(cl);
 
-                    XposedBridge.log(TAG + ": Screen woken by " + source);
+                    XposedBridge.log("Screen woken (2-param) by " + source);
                 }
             } finally {
                 // 恢复原始调用方身份
@@ -450,7 +443,7 @@ public class MainHook implements IXposedHookLoadPackage {
             // 播放完成后自动释放
             mediaPlayer.setOnCompletionListener(MediaPlayer::release);
 
-//            XposedBridge.log(TAG + ": notification sound played");
+            XposedBridge.log(TAG + ": notification sound played");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": play sound failed: " + t);
         }
@@ -511,7 +504,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
                                 // 获取应用名并显示 Toast
                                 String appName = getAppName(targetPackage);
-                                String displayText = "📱 " + appName + " 📨 FCM 消息";
+                                String displayText = "📱 " + appName + "\n📨 FCM 消息";
 
                                 // 获取消息内容（如果有）
                                 Bundle extras = intent.getExtras();
@@ -519,9 +512,11 @@ public class MainHook implements IXposedHookLoadPackage {
                                     String title = extras.getString("gcm.n.title");
                                     String body = extras.getString("gcm.n.body");
                                     if (title != null && body != null) {
-                                        displayText = "📱 " + appName + " 📩 " + title + " " + body;
+                                        displayText = "📱 " + appName +
+                                                "\n📩 " + title + "\n" + body;
                                     } else if (body != null) {
-                                        displayText = "📱 " + appName + " 📩 " + body;
+                                        displayText = "📱 " + appName +
+                                                "\n📩 " + body;
                                     }
                                 }
 
@@ -612,8 +607,24 @@ public class MainHook implements IXposedHookLoadPackage {
                                 Toast.LENGTH_LONG
                         );
 
+                        // 设置 Toast 类型为系统级
+                        try {
+                            // Android 8.0+ 需要设置窗口类型
+                            Object windowManager = XposedHelpers.callMethod(toast, "getWindowManager");
+                            if (windowManager != null) {
+                                // 使用 TYPE_SYSTEM_ALERT 或 TYPE_TOAST
+                                int type = 0x7D3; // TYPE_SYSTEM_ALERT
+                                if (Build.VERSION.SDK_INT >= 26) {
+                                    type = 0x7D5; // TYPE_APPLICATION_OVERLAY
+                                }
+                                XposedHelpers.setIntField(windowManager, "mLayoutParams.type", type);
+                            }
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + ": set toast type failed: " + t);
+                        }
+
                         toast.show();
-                        XposedBridge.log(TAG + ": Toast shown: " + finalMessage + "\n");
+                        XposedBridge.log(TAG + ": Toast shown: " + finalMessage);
 
                     } catch (Throwable t) {
                         XposedBridge.log(TAG + ": Toast display failed: " + t);
