@@ -1,11 +1,14 @@
 package com.example.appalive;
 
 import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.NotificationChannel;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.media.AudioManager;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
@@ -34,12 +37,19 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final String TAG = "AppAlive";
     // AOSP source code https://cs.android.com/android/platform/superproject/+/android-latest-release:frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java;l=602?q=ActivityManagerService&sq=
     // lineage 18.1 source code https://github.com/LineageOS/android_frameworks_base/blob/lineage-18.1/services/core/java/com/android/server/am/ActivityManagerService.java
+    // NMS -> screen off -> wakeup screen, play sound, no toast
+    //     -> screen on -> nothing
+
+    // FCM -> screen off -> toast/notification, wakeup screen, play sound
+    //     -> screen on -> toast/notification, nothing
+
 
     private static final String ACTION_FCM = "com.google.firebase.MESSAGING_EVENT";
     private static final String ACTION_GCM = "com.google.android.c2dm.intent.RECEIVE"; // legacy GCM
     private static long lastWake = 0;
     private static Context sSystemContext = null;
     private static final Object lock = new Object();
+    private static int notificationId = 0;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -186,7 +196,14 @@ public class MainHook implements IXposedHookLoadPackage {
                             Notification n = (Notification) param.args[6];
                             if (n == null || !isMessageNotification(n)) return;
 //                            wake(cl);
-                            wakeScreen("NMS", cl);
+                            String source = "NMS ";
+                            if (param.args[0] instanceof String){
+                                if (param.args[0] != null) {
+                                    source = source +  getAppName((String) param.args[0]);
+                                }
+                            }
+
+                            wakeScreen(source, cl);
                         }
                     }
             );
@@ -270,11 +287,13 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     private boolean isMessageNotification(Notification n) {
+        if (n == null) return false;
         if (Notification.CATEGORY_MESSAGE.equals(n.category)) return true;
         if (hasMessagingStyle(n)) {
             return true;
         }
 
+        if (n.extras == null) return false;
 
         CharSequence text = n.extras.getCharSequence(Notification.EXTRA_TEXT);
         if (text == null) {
@@ -352,10 +371,13 @@ public class MainHook implements IXposedHookLoadPackage {
                             "FCM:" + source
                     );
                     lastWake = now;
-                    XposedBridge.log("Screen woken (3-param) by " + source);
+                    XposedBridge.log(TAG + ": Screen woken by " + source);
 
-                    playNotificationSound(cl);
-
+                    AudioManager am = sSystemContext.getSystemService(AudioManager.class);
+                    if (am.getStreamVolume(AudioManager.STREAM_NOTIFICATION) != 0) {
+                        // 静音模式下只亮屏，不播放声音
+                        playNotificationSound(cl);
+                    }
 
                     return;
                 } catch (Throwable t) {
@@ -366,9 +388,13 @@ public class MainHook implements IXposedHookLoadPackage {
                     );
                     lastWake = now;
 
-                    playNotificationSound(cl);
+                    AudioManager am = sSystemContext.getSystemService(AudioManager.class);
+                    if (am.getStreamVolume(AudioManager.STREAM_NOTIFICATION) != 0) {
+                        // 静音模式下只亮屏，不播放声音
+                        playNotificationSound(cl);
+                    }
 
-                    XposedBridge.log("Screen woken (2-param) by " + source);
+                    XposedBridge.log(TAG + ": Screen woken by " + source);
                 }
             } finally {
                 // 恢复原始调用方身份
@@ -443,7 +469,7 @@ public class MainHook implements IXposedHookLoadPackage {
             // 播放完成后自动释放
             mediaPlayer.setOnCompletionListener(MediaPlayer::release);
 
-            XposedBridge.log(TAG + ": notification sound played");
+//            XposedBridge.log(TAG + ": notification sound played");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": play sound failed: " + t);
         }
@@ -504,24 +530,41 @@ public class MainHook implements IXposedHookLoadPackage {
 
                                 // 获取应用名并显示 Toast
                                 String appName = getAppName(targetPackage);
-                                String displayText = "📱 " + appName + "\n📨 FCM 消息";
+                                String displayText = appName + " FCM ";
+                                String title = null;
+                                String body = null;
 
                                 // 获取消息内容（如果有）
                                 Bundle extras = intent.getExtras();
                                 if (extras != null) {
-                                    String title = extras.getString("gcm.n.title");
-                                    String body = extras.getString("gcm.n.body");
-                                    if (title != null && body != null) {
-                                        displayText = "📱 " + appName +
-                                                "\n📩 " + title + "\n" + body;
-                                    } else if (body != null) {
-                                        displayText = "📱 " + appName +
-                                                "\n📩 " + body;
+                                    String[] titleKeys = {"gcm.n.title", "title", "notification.title"};
+                                    String[] bodyKeys = {"gcm.n.body", "body", "notification.body"};
+
+                                    for (String key : titleKeys) {
+                                        if (extras.containsKey(key)) {
+                                            title = extras.getString(key);
+                                        }
+                                    }
+
+                                    for (String key2: bodyKeys) {
+                                        if (extras.containsKey(key2)) {
+                                            body = extras.getString(key2);
+                                        }
+                                    }
+
+                                    if (title != null){
+                                        displayText = displayText + "title: " + title;
+                                    }
+
+                                    if (body != null){
+                                        displayText = displayText + " content: " + body;
                                     }
                                 }
 
                                 // 显示 Toast（在 system_server 中需要特殊处理）
-                                showToast(cl, displayText);
+                                // showToast(cl, displayText);
+
+                                showSystemNotification(appName, displayText);
 
                                 // 执行唤醒
                                 wakeScreen("FCM from " + appName, cl);
@@ -607,24 +650,8 @@ public class MainHook implements IXposedHookLoadPackage {
                                 Toast.LENGTH_LONG
                         );
 
-                        // 设置 Toast 类型为系统级
-                        try {
-                            // Android 8.0+ 需要设置窗口类型
-                            Object windowManager = XposedHelpers.callMethod(toast, "getWindowManager");
-                            if (windowManager != null) {
-                                // 使用 TYPE_SYSTEM_ALERT 或 TYPE_TOAST
-                                int type = 0x7D3; // TYPE_SYSTEM_ALERT
-                                if (Build.VERSION.SDK_INT >= 26) {
-                                    type = 0x7D5; // TYPE_APPLICATION_OVERLAY
-                                }
-                                XposedHelpers.setIntField(windowManager, "mLayoutParams.type", type);
-                            }
-                        } catch (Throwable t) {
-                            XposedBridge.log(TAG + ": set toast type failed: " + t);
-                        }
-
                         toast.show();
-                        XposedBridge.log(TAG + ": Toast shown: " + finalMessage);
+                        XposedBridge.log(TAG + ": Toast shown: " + finalMessage + "\n");
 
                     } catch (Throwable t) {
                         XposedBridge.log(TAG + ": Toast display failed: " + t);
@@ -636,5 +663,34 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": showToast failed: " + t);
         }
     }
+
+    private void showSystemNotification(String title, String content) {
+        try{
+            if (sSystemContext == null) return;
+            NotificationManager nm = sSystemContext.getSystemService(NotificationManager.class);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                NotificationChannel channel = new NotificationChannel("fcm_intercept_channel",
+                        "FCM 消息拦截", NotificationManager.IMPORTANCE_HIGH);
+                nm.createNotificationChannel(channel);
+            }
+            Notification n = new Notification.Builder(sSystemContext, "fcm_intercept_channel")
+                    .setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .setContentTitle(title)
+                    .setContentText(content)
+                    .setAutoCancel(true)
+                    .setCategory(Notification.CATEGORY_MESSAGE)
+                    .setPriority(Notification.PRIORITY_HIGH)
+                    .build();
+
+            // notificationId = (notificationId % Integer.MAX_VALUE) + 1;
+            // int id = notificationId;
+            int id = (int) (System.nanoTime() % Integer.MAX_VALUE);
+            nm.notify("fcm_intercept_" + System.currentTimeMillis(), id, n);
+
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": showSystemNotification failed: " + t);
+        }
+    }
+
 
 }
