@@ -3,15 +3,14 @@ package com.example.appalive;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.NotificationChannel;
-import android.content.ComponentName;
 import android.content.Context;
-import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.media.AudioManager;
 import android.os.Binder;
 import android.os.Build;
-import android.os.Bundle;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.os.SystemClock;
@@ -46,12 +45,17 @@ public class MainHook implements IXposedHookLoadPackage {
     // NMS -> screen off -> wakeup screen, play sound, no toast
     //     -> screen on -> nothing
 
-    // FCM -> screen off -> toast/notification, wakeup screen, play sound
-    //     -> screen on -> toast/notification, nothing
+    // Fix 1 (2026-09-20): REMOVED the ActivityManagerService.broadcastIntentLocked hook.
+    // broadcastIntentLocked runs on EVERY broadcast system-wide — including display
+    // broadcasts dispatched on the "android.display" thread — and the hook body did
+    // PackageManager IPC + NMS notify + wakeUp inline there. That is the prime suspect
+    // for the system_server SIGSEGVs (tombstones: android.display thread, garbage PC).
+    // FCM messages that surface as notifications — including GMS/GSF-proxied ones
+    // (opPkg check in the NMS hook) — are still covered. Only the rare
+    // "broadcast delivered without any notification" path is no longer detected.
 
-    private static final String ACTION_FCM = "com.google.firebase.MESSAGING_EVENT";
-    private static final String ACTION_GCM = "com.google.android.c2dm.intent.RECEIVE"; // legacy GCM
-    private static long lastWake = 0;
+    private static final String INTERCEPT_TAG = "fcm_intercept";
+    private static volatile long lastWake = 0;
     private static Context sSystemContext = null;
     private static final Object lock = new Object();
     private static int notificationId = 0;
@@ -64,6 +68,27 @@ public class MainHook implements IXposedHookLoadPackage {
     // 用 ConcurrentHashMap：binder 多线程并发访问安全；条目数 ≈ 应用数量，不会无限增长
     private static final java.util.Map<String, Long> sLastWakeByApp =
             new java.util.concurrent.ConcurrentHashMap<>();
+
+    // ── Fix 3 (2026-09-20): dedicated worker thread ────────────────
+    // ALL side effects (PackageManager IPC, wakeUp, MediaPlayer, NMS notify)
+    // used to run inline on whatever thread fired the hook — including
+    // system_server's "android.display" and binder threads. They now run on
+    // one private HandlerThread, so hook bodies do nothing but capture args
+    // and post. Heavy/serialized-by-design: notifications fire at most a few
+    // times per second; debounce prevents queue flooding.
+    private static Handler sWorkerHandler = null;
+    private static final Object sWorkerHandlerLock = new Object();
+
+    private static Handler getWorker() {
+        synchronized (sWorkerHandlerLock) {
+            if (sWorkerHandler == null) {
+                HandlerThread ht = new HandlerThread("AppAliveWorker");
+                ht.start();
+                sWorkerHandler = new Handler(ht.getLooper());
+            }
+            return sWorkerHandler;
+        }
+    }
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -182,7 +207,7 @@ public class MainHook implements IXposedHookLoadPackage {
         // 拿到的 NotificationManager.mService 为 null，createNotificationChannel 会 NPE。
 
         hookNotificationManager(lpparam.classLoader);
-        hookFcmBroadcast(lpparam.classLoader);
+        // Fix 1: hookFcmBroadcast() call removed — see note at top of class.
         hookBootComplete(lpparam.classLoader);
     }
 
@@ -198,46 +223,79 @@ public class MainHook implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
-                            try{
-                                // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
-                                if (param.args.length > 4 && "fcm_intercept".equals(param.args[4])) return;
-    
-                                Notification n = (Notification) param.args[6];
-                                if (!isMessageNotification(n)) return;
-    
-                                String pkg = param.args[0] instanceof String ? (String) param.args[0] : null;
-                                String opPkg = (param.args.length > 1 && param.args[1] instanceof String)
-                                        ? (String) param.args[1] : null;
-    
-                                if (isDuplicateMsg(pkg, opPkg)) return;
-                                XposedBridge.log(TAG + ": NMS " + pkg);
-                                // FCM 通知类消息在应用处于后台时，由 Google Play services 直接代为展示，
-                                // 系统不会发送 MESSAGING_EVENT 广播（hookFcmBroadcast 收不到这种消息）。
-                                // 通过 opPkg 识别 GMS/GSF 代发的通知，补上拦截通知。
-                                boolean fromGms = "com.google.android.gms".equals(opPkg)
-                                        || "com.google.android.gsf".equals(opPkg);
-                                boolean gmsOwn = "com.google.android.gms".equals(pkg)
-                                        || "com.google.android.gsf".equals(pkg);
-                                if (fromGms && !gmsOwn) {
-                                    CharSequence title = n.extras != null
-                                            ? n.extras.getCharSequence(Notification.EXTRA_TITLE) : null;
-                                    CharSequence text = n.extras != null
-                                            ? n.extras.getCharSequence(Notification.EXTRA_TEXT) : null;
-                                    callNMS_Reflection(
-                                            title != null ? title.toString()
-                                                    : (pkg != null ? getAppName(pkg) : "FCM"),
-                                            text != null ? text.toString() : "",
-                                            cl);
+                            // Fix 2 (2026-09-20): resolve arguments BY TYPE, never by index.
+                            // enqueueNotificationInternal has shipped in several signatures
+                            // (7/9/10 params, extra attribution tag on newer Android), and
+                            // PixelOS reshuffles them. A hard-coded args[6] cast grabs the
+                            // wrong object — or ClassCastExceptions — inside system_server
+                            // after every ROM/framework update.
+                            Notification n = firstArg(param.args, Notification.class);
+                            if (n == null) return;
+
+                            // pkg/opPkg are always the first two String args across all
+                            // known signatures (ints in between are boxed Integers).
+                            String pkg = null, opPkg = null;
+                            boolean ownTag = false;
+                            int stringIdx = 0;
+                            for (Object a : param.args) {
+                                if (a instanceof String) {
+                                    if (INTERCEPT_TAG.equals(a)) ownTag = true; // value match, not position
+                                    if (stringIdx == 0) pkg = (String) a;
+                                    else if (stringIdx == 1) opPkg = (String) a;
+                                    stringIdx++;
                                 }
-                                String source = "NMS ";
-                                if (pkg != null) { source = source + getAppName(pkg); }
-                                wakeScreen(source, cl);
-                            } catch (Throwable t) { XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t); }
+                            }
+                            // 防重入：跳过我们自己投递的拦截通知
+                            if (ownTag) return;
+
+                            if (!isMessageNotification(n)) return;
+
+                            if (isDuplicateMsg(pkg, opPkg)) return;
+                            XposedBridge.log(TAG + ": NMS " + pkg);
+                            // Fix 3: extract Bundle fields NOW (caller thread, before NMS
+                            // clones/parcels the notification — Bundle is not thread-safe
+                            // for cross-thread reads), then defer all IPC/side effects.
+                            final CharSequence fTitle = n.extras != null
+                                    ? n.extras.getCharSequence(Notification.EXTRA_TITLE) : null;
+                            final CharSequence fText = n.extras != null
+                                    ? n.extras.getCharSequence(Notification.EXTRA_TEXT) : null;
+                            final String fPkg = pkg;
+                            final String fOpPkg = opPkg;
+                            final ClassLoader fCl = cl;
+                            getWorker().post(new Runnable() {
+                                @Override public void run() {
+                                    handleNmsMessage(fPkg, fOpPkg, fTitle, fText, fCl);
+                                }
+                            });
                         }
                     }
             );
             XposedBridge.log(TAG + ": Hooked enqueueNotificationInternal ✓");
         } catch (Throwable t) { XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t); }
+    }
+
+    /**
+     * Fix 3: the heavy half of the NMS hook — runs ONLY on the AppAliveWorker thread.
+     * GMS/GSF-proxied FCM notifications (app in background → Play services posts the
+     * notification itself, no MESSAGING_EVENT broadcast is sent) get an intercept
+     * notification; every message wakes the screen.
+     */
+    private void handleNmsMessage(String pkg, String opPkg,
+                                  CharSequence title, CharSequence text, ClassLoader cl) {
+        boolean fromGms = "com.google.android.gms".equals(opPkg)
+                || "com.google.android.gsf".equals(opPkg);
+        boolean gmsOwn = "com.google.android.gms".equals(pkg)
+                || "com.google.android.gsf".equals(pkg);
+        if (fromGms && !gmsOwn) {
+            callNMS_Reflection(
+                    title != null ? title.toString()
+                            : (pkg != null ? getAppName(pkg) : "FCM"),
+                    text != null ? text.toString() : "",
+                    cl);
+        }
+        String source = "NMS ";
+        if (pkg != null) { source = source + getAppName(pkg); }
+        wakeScreen(source, cl);
     }
 
     private boolean hasMessagingStyle(Notification n) {
@@ -272,7 +330,18 @@ public class MainHook implements IXposedHookLoadPackage {
 //                && (n.flags & Notification.FLAG_GROUP_SUMMARY) == 0;
     }
 
-    private void wakeScreen(String source, ClassLoader cl) {
+    private void wakeScreen(final String source, final ClassLoader cl) {
+        // Fix 3: thread-guard — if we are not on the AppAliveWorker thread, re-post
+        // ourselves there and return immediately. Belt-and-braces on top of the
+        // capture-and-post design: no IPC/wakeUp can ever run on a system_server
+        // hook thread (android.display / binder) again.
+        if (!"AppAliveWorker".equals(Thread.currentThread().getName())) {
+            final ClassLoader fCl = cl;
+            getWorker().post(new Runnable() {
+                @Override public void run() { wakeScreen(source, fCl); }
+            });
+            return;
+        }
         if (sSystemContext == null) return;
         long now = SystemClock.elapsedRealtime();
         if (now - lastWake < 3000) return;                 // IMPORTANT: both hooks fire for one message
@@ -353,78 +422,6 @@ public class MainHook implements IXposedHookLoadPackage {
             mediaPlayer.setOnCompletionListener(MediaPlayer::release);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": play sound failed: " + t);
-        }
-    }
-
-    private void hookFcmBroadcast(ClassLoader cl) {
-        try {
-            Class<?> ams = XposedHelpers.findClass(
-                    "com.android.server.am.ActivityManagerService", cl);
-            XposedBridge.hookAllMethods(ams, "broadcastIntentLocked",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            try {
-                                // 提取 Intent 和调用者信息
-                                Intent intent = null;
-                                String callerPackage = null;
-                                Integer callingUid = null;
-
-                                for (Object arg : param.args) {
-                                    if (arg instanceof Intent) {
-                                        intent = (Intent) arg;
-                                    } else if (arg instanceof String) {
-                                        String str = (String) arg;
-                                        if (str != null && str.contains(".") && str.length() > 5) {
-                                            // 可能是包名
-                                            callerPackage = str;
-                                        }
-                                    } else if (arg instanceof Integer && (Integer) arg >= 10000) {
-                                        callingUid = (Integer) arg;
-                                    }
-                                }
-
-                                if (intent == null) return;
-
-                                String action = intent.getAction();
-                                if (!ACTION_FCM.equals(action) && !ACTION_GCM.equals(action)) { return; }
-
-                                // 获取目标包名
-                                String targetPackage = intent.getPackage();
-                                ComponentName component = intent.getComponent();
-                                if (targetPackage == null && component != null) { targetPackage = component.getPackageName(); }
-
-                                // 如果目标包名为空，尝试通过 UID 反查
-                                if (targetPackage == null && callingUid != null) { targetPackage = getPackageNameByUid(callingUid); }
-
-                                if (targetPackage == null) { XposedBridge.log(TAG + ": target package is null"); return; }
-                                String appName = getAppName(targetPackage);
-                                String displayText = appName + " FCM ";
-                                String title = null;
-                                String body = null;
-
-                                // 获取消息内容（如果有）
-                                Bundle extras = intent.getExtras();
-                                if (extras != null) {
-                                    String[] titleKeys = {"gcm.n.title", "title", "notification.title"};
-                                    String[] bodyKeys = {"gcm.n.body", "body", "notification.body"};
-                                    for (String key : titleKeys) { if (extras.containsKey(key)) { title = extras.getString(key); } }
-                                    for (String key2: bodyKeys) { if (extras.containsKey(key2)) { body = extras.getString(key2); } }
-                                    if (title != null){ displayText = displayText + "title: " + title; }
-                                    if (body != null){ displayText = displayText + " content: " + body; }
-                                }
-                                // showToast(cl, displayText);
-                                callNMS_Reflection(appName, displayText, cl);
-                                wakeScreen("FCM " + appName, cl);
-                                XposedBridge.log(TAG + ": FCM " + appName + " (" + targetPackage + ")");
-                            } catch (Throwable t) {
-                                XposedBridge.log(TAG + ": Error in hook: " + t);
-                            }
-                        }
-                    });
-            XposedBridge.log(TAG + ": Hooked broadcastIntentLocked ✓");
-        } catch (Throwable t) {
-            XposedBridge.log("Hooked broadcastIntentLocked failed: " + t);
         }
     }
 
@@ -556,7 +553,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
                 // int notificationId = (int) (System.currentTimeMillis() % Integer.MAX_VALUE);
                 notificationId = (notificationId + 1) & 0x7FFFFFFF;   // static field, replaces previous card
-                nms_obj.notify("fcm_intercept", notificationId, notification);
+                nms_obj.notify(INTERCEPT_TAG, notificationId, notification);
 
             } finally {
                 Binder.restoreCallingIdentity(ident);
