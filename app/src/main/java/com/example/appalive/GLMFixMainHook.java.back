@@ -37,7 +37,7 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
-public class MainHook implements IXposedHookLoadPackage {
+public class GLMMainHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "AppAlive";
     // AOSP source code https://cs.android.com/android/platform/superproject/+/android-latest-release:frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java;l=602?q=ActivityManagerService&sq=
@@ -289,7 +289,23 @@ public class MainHook implements IXposedHookLoadPackage {
         if (fromGms && !gmsOwn) {
             callNMS_Reflection(
                     title != null ? title.toString()
+                            : private void handleNmsMessage(String pkg, String opPkg,
+                                  CharSequence title, CharSequence text, ClassLoader cl) {
+        boolean fromGms = "com.google.android.gms".equals(opPkg)
+                || "com.google.android.gsf".equals(opPkg);
+        boolean gmsOwn = "com.google.android.gms".equals(pkg)
+                || "com.google.android.gsf".equals(pkg);
+        if (fromGms && !gmsOwn) {
+            callNMS_Reflection(
+                    title != null ? title.toString()
                             : (pkg != null ? getAppName(pkg) : "FCM"),
+                    text != null ? text.toString() : "",
+                    cl);
+        }
+        String source = "NMS ";
+        if (pkg != null) { source = source + getAppName(pkg); }
+        wakeScreen(source, cl);
+    }(pkg != null ? getAppName(pkg) : "FCM"),
                     text != null ? text.toString() : "",
                     cl);
         }
