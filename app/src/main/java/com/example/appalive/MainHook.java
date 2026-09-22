@@ -12,6 +12,7 @@ import android.media.AudioManager;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
@@ -26,6 +27,8 @@ import android.media.RingtoneManager;
 import android.net.Uri;
 import android.widget.Toast;
 
+import java.io.File;
+import java.io.FileWriter;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -82,6 +85,22 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+    private static void logToFile(final String msg) {
+        try{
+            getWorker().post(new Runnable() {
+                @Override public void run() {
+                    try{
+                        File f = new File(Environment.getExternalStorageDirectory(), "system.log");
+                        FileWriter writer = new FileWriter(f, true);
+                        writer.write(msg + "\n");
+                        writer.flush();
+                        writer.close();
+                } catch (Throwable t) { XposedBridge.log(TAG + ": write log failed: " + t.getMessage()); }
+                }
+            });
+        } catch (Throwable t) { XposedBridge.log(TAG + ": write log failed: " + t.getMessage()); }
+    }
+
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
 //        if (!"android".equals(lpparam.packageName)) return;
@@ -126,7 +145,12 @@ public class MainHook implements IXposedHookLoadPackage {
                         XposedBridge.hookMethod(method,
                                 new XC_MethodHook() {
                                     @Override
-                                    protected void beforeHookedMethod(MethodHookParam param) { param.setResult(false); }
+                                    protected void beforeHookedMethod(MethodHookParam param) {
+                                        try{
+                                            logToFile("updateAppProcessCpuTimeLPr trigger");
+                                        param.setResult(false);
+                                        } catch (Throwable t) {XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());}
+                                    }
                                 }
                         );
                         XposedBridge.log(TAG + ": Hooked checkExcessivePowerUsageLPr ✓");
@@ -142,9 +166,14 @@ public class MainHook implements IXposedHookLoadPackage {
                                 new XC_MethodHook() {
                                     @Override
                                     protected void beforeHookedMethod(MethodHookParam param) {
+                                        try{
+
+                                            logToFile("updateAppProcessCpuTimeLPr trigger");
                                         if (param.args.length > 1 && param.args[1] instanceof Boolean) {
                                             param.args[1] = false;
                                         }
+
+                                        } catch (Throwable t) {XposedBridge.log(TAG + ": updateAppProcessCpuTimeLPr FAILED: " + t.getMessage());}
                                     }
                                 }
                         );
@@ -160,7 +189,14 @@ public class MainHook implements IXposedHookLoadPackage {
                         XposedBridge.hookMethod(method,
                                 new XC_MethodHook() {
                                     @Override
-                                    protected void beforeHookedMethod(MethodHookParam param) { param.args[1] = false; }
+                                    protected void beforeHookedMethod(MethodHookParam param) {
+                                       try{
+                                        logToFile("updatePhantomProcessCpuTimeLPr trigger");
+                                        if (param.args != null && param.args.length > 1 && param.args[1] instanceof Boolean) {
+                                            param.args[1] = Boolean.FALSE;
+                                        }
+                                       } catch (Throwable t) {XposedBridge.log(TAG + ": updateAppProcessCpuTimeLPr FAILED: " + t.getMessage());}
+                                    }
                                 }
                         );
                         XposedBridge.log(TAG + ": Hooked updatePhantomProcessCpuTimeLPr ✓");
@@ -176,7 +212,12 @@ public class MainHook implements IXposedHookLoadPackage {
                         XposedBridge.hookMethod(method,
                                 new XC_MethodHook() {
                                     @Override
-                                    protected void beforeHookedMethod(MethodHookParam param) { param.setResult(null); }
+                                    protected void beforeHookedMethod(MethodHookParam param) {
+                                        try{
+                                            logToFile("sendKillExcessiveCpuProfilingTrigger trigger");
+                                            param.setResult(null);
+                                        } catch (Throwable t) {XposedBridge.log(TAG + ": sendKillExcessiveCpuProfilingTrigger FAILED: " + t.getMessage());}
+                                    }
                                 }
                         );
                         XposedBridge.log(TAG + ": Hooked sendKillExcessiveCpuProfilingTrigger ✓");
@@ -189,6 +230,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     // ─── Hook 5: checkExcessivePowerUsageLocked → no-op ───
                     // this is in lineageos 18.1
                     try {
+                        logToFile("checkExcessivePowerUsageLocked trigger");
                         XposedBridge.hookMethod(method, XC_MethodReplacement.DO_NOTHING);
                         XposedBridge.log(TAG + ": Hooked checkExcessivePowerUsageLocked ✓");
                     } catch (Throwable t) {
