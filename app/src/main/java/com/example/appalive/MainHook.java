@@ -74,6 +74,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static Handler sWorkerHandler = null;
     private static final Object sWorkerHandlerLock = new Object();
 
+    private static final Object sLogWriterLock = new Object();
+
     private static Handler getWorker() {
         synchronized (sWorkerHandlerLock) {
             if (sWorkerHandler == null) {
@@ -90,11 +92,21 @@ public class MainHook implements IXposedHookLoadPackage {
             getWorker().post(new Runnable() {
                 @Override public void run() {
                     try{
-                        File f = new File(Environment.getExternalStorageDirectory(), "system.log");
-                        FileWriter writer = new FileWriter(f, true);
-                        writer.write(msg + "\n");
-                        writer.flush();
-                        writer.close();
+                        synchronized (sLogWriterLock) {
+
+                            String ts = new java.text.SimpleDateFormat(
+                            "yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+                            .format(new java.util.Date());
+
+
+                            java.io.File dir = android.os.Environment
+                                    .getExternalStorageDirectory();
+                            java.io.File f = new java.io.File(dir, "xposed.txt");
+                            FileWriter writer = new FileWriter(f, true);
+                            writer.write(ts + " " + msg + "\n");
+                            writer.flush();
+                            writer.close();
+                        }
                 } catch (Throwable t) { XposedBridge.log(TAG + ": write log failed: " + t.getMessage()); }
                 }
             });
@@ -247,6 +259,7 @@ public class MainHook implements IXposedHookLoadPackage {
         hookNotificationManager(lpparam.classLoader);
 //        hookFcmBroadcast(lpparam.classLoader);
         hookBootComplete(lpparam.classLoader);
+        logToFile("start \n");
     }
 
     // ── Hook B: every message that becomes a notification ─────────────
