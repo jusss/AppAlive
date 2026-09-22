@@ -1,0 +1,69 @@
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): 172.233.90.118:8000
+DEBUG:urllib3.connectionpool:http://172.233.90.118:8000 "POST /mcp HTTP/1.1" 200 1016
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): 172.233.90.118:8000
+DEBUG:urllib3.connectionpool:http://172.233.90.118:8000 "POST /mcp HTTP/1.1" 200 1016
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): 172.233.90.118:8000
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): 172.233.90.118:8000
+DEBUG:urllib3.connectionpool:http://172.233.90.118:8000 "POST /mcp HTTP/1.1" 200 7568
+DEBUG:urllib3.connectionpool:http://172.233.90.118:8000 "POST /mcp HTTP/1.1" 200 7592
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): 172.233.90.118:8000
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): 172.233.90.118:8000
+DEBUG:urllib3.connectionpool:http://172.233.90.118:8000 "POST /mcp HTTP/1.1" 200 1016
+DEBUG:urllib3.connectionpool:http://172.233.90.118:8000 "POST /mcp HTTP/1.1" 200 5538
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None
+DEBUG:asyncio:Using selector: EpollSelector
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): 172.233.90.118:8006
+DEBUG:urllib3.connectionpool:http://172.233.90.118:8006 "POST /mcp HTTP/1.1" 200 400
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): open.bigmodel.cn:443
+DEBUG:urllib3.connectionpool:https://open.bigmodel.cn:443 "POST /api/coding/paas/v4/chat/completions HTTP/1.1" 200 None

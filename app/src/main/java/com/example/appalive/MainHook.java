@@ -99,9 +99,10 @@ public class MainHook implements IXposedHookLoadPackage {
                             .format(new java.util.Date());
 
 
-                            java.io.File dir = android.os.Environment
-                                    .getExternalStorageDirectory();
-                            java.io.File f = new java.io.File(dir, "xposed.txt");
+                            // system_server can not visit /sdcard
+                            java.io.File f = new java.io.File("/data/system", "xposed.txt");
+
+
                             FileWriter writer = new FileWriter(f, true);
                             writer.write(ts + " " + msg + "\n");
                             writer.flush();
@@ -112,6 +113,29 @@ public class MainHook implements IXposedHookLoadPackage {
             });
         } catch (Throwable t) { XposedBridge.log(TAG + ": write log failed: " + t.getMessage()); }
     }
+
+    private static void logWriteFile(final String msg) {
+        try{
+                        synchronized (sLogWriterLock) {
+
+                            String ts = new java.text.SimpleDateFormat(
+                                    "yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+                                    .format(new java.util.Date());
+
+
+                            // system_server can not visit /sdcard
+                            java.io.File f = new java.io.File("/data/system", "xposed.txt");
+
+
+                            FileWriter writer = new FileWriter(f, true);
+                            writer.write(ts + " " + msg + "\n");
+                            writer.flush();
+                            writer.close();
+                        }
+        } catch (Throwable t) { XposedBridge.log(TAG + ": write log failed: " + t.getMessage()); }
+    }
+
+
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -259,7 +283,6 @@ public class MainHook implements IXposedHookLoadPackage {
         hookNotificationManager(lpparam.classLoader);
 //        hookFcmBroadcast(lpparam.classLoader);
         hookBootComplete(lpparam.classLoader);
-        logToFile("start \n");
     }
 
     // ── Hook B: every message that becomes a notification ─────────────
@@ -275,6 +298,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             try{
+                                logToFile("enqueueNotificationInternal trigger\n");
+
                                 // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
                                 if (param.args.length > 4 && "fcm_intercept".equals(param.args[4])) return;
 
@@ -287,7 +312,9 @@ public class MainHook implements IXposedHookLoadPackage {
                                 String pkg = param.args[0] instanceof String ? (String) param.args[0] : null;
                                 String opPkg = (param.args.length > 1 && param.args[1] instanceof String)
                                         ? (String) param.args[1] : null;
-    
+
+
+                                logToFile("enqueueNotificationInternal trigger " + pkg + " " + opPkg + " \n");
                                 if (isDuplicateMsg(pkg, opPkg)) return;
                                 XposedBridge.log(TAG + ": NMS " + pkg);
 
@@ -561,6 +588,8 @@ public class MainHook implements IXposedHookLoadPackage {
                                         callNMS_Reflection("Boot test", "NMS reflection OK after boot", cl);
                                     }
                                 }, "AppAliveBootTest").start();
+
+                                logToFile("start\n");
                         } catch (Throwable t) {
                             XposedBridge.log(TAG + ": Hooked finishBooting failed: " + t);
                         }
