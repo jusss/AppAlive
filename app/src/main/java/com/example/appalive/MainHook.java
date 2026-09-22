@@ -76,6 +76,10 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private static final Object sLogWriterLock = new Object();
 
+    private static final java.text.SimpleDateFormat sTsFormat =
+            new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US);
+
+
     private static Handler getWorker() {
         synchronized (sWorkerHandlerLock) {
             if (sWorkerHandler == null) {
@@ -87,6 +91,7 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+
     private static void logToFile(final String msg) {
         try{
             getWorker().post(new Runnable() {
@@ -94,19 +99,25 @@ public class MainHook implements IXposedHookLoadPackage {
                     try{
                         synchronized (sLogWriterLock) {
 
-                            String ts = new java.text.SimpleDateFormat(
-                            "yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
-                            .format(new java.util.Date());
+//                            String ts = new java.text.SimpleDateFormat(
+//                            "yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+//                            .format(new java.util.Date());
+
+                            String ts = sTsFormat.format(new java.util.Date());
 
 
                             // system_server can not visit /sdcard
                             java.io.File f = new java.io.File("/data/system", "xposed.txt");
 
 
-                            FileWriter writer = new FileWriter(f, true);
+                            java.io.BufferedWriter writer = new java.io.BufferedWriter(
+                                        new java.io.FileWriter(f, true), 8192);
+
+
+//                            FileWriter writer = new FileWriter(f, true);
                             writer.write(ts + " " + msg + "\n");
                             writer.flush();
-                            writer.close();
+//                            writer.close();
                         }
                 } catch (Throwable t) { XposedBridge.log(TAG + ": write log failed: " + t.getMessage()); }
                 }
