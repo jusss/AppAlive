@@ -194,7 +194,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                     @Override
                                     protected void beforeHookedMethod(MethodHookParam param) {
                                         try{
-                                            logToFile("updateAppProcessCpuTimeLPr trigger");
+                                            logToFile("checkExcessivePowerUsageLPr trigger");
                                         param.setResult(false);
                                         } catch (Throwable t) {XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());}
                                     }
@@ -242,7 +242,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                         if (param.args != null && param.args.length > 1 && param.args[1] instanceof Boolean) {
                                             param.args[1] = Boolean.FALSE;
                                         }
-                                       } catch (Throwable t) {XposedBridge.log(TAG + ": updateAppProcessCpuTimeLPr FAILED: " + t.getMessage());}
+                                       } catch (Throwable t) {XposedBridge.log(TAG + ": updatePhantomProcessCpuTimeLPr FAILED: " + t.getMessage());}
                                     }
                                 }
                         );
