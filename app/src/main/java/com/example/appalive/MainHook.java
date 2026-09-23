@@ -331,8 +331,12 @@ public class MainHook implements IXposedHookLoadPackage {
                     String pkg = (String) param.args[0];
                     String tag = (String) param.args[4];
 
+
                     logToFile("enqueueNotificationInternal pkg=" + pkg + " tag=" + tag + "\n");
                     XposedBridge.log(TAG + ": NMS " + pkg);
+
+                    if (pkg.equals("com.android.vending")) return;
+                    if (pkg.equals("android")) return;
 
                     // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
                     if (param.args.length > 4 && "fcm_intercept".equals(param.args[4])) return;
