@@ -98,22 +98,12 @@ public class MainHook implements IXposedHookLoadPackage {
                 @Override public void run() {
                     try{
                         synchronized (sLogWriterLock) {
-
-//                            String ts = new java.text.SimpleDateFormat(
-//                            "yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
-//                            .format(new java.util.Date());
-
                             String ts = sTsFormat.format(new java.util.Date());
-
 
                             // system_server can not visit /sdcard
                             java.io.File f = new java.io.File("/data/system", "xposed.txt");
-
-
                             java.io.BufferedWriter writer = new java.io.BufferedWriter(
                                         new java.io.FileWriter(f, true), 8192);
-
-
 //                            FileWriter writer = new FileWriter(f, true);
                             writer.write(ts + " " + msg + "\n");
                             writer.flush();
@@ -128,16 +118,11 @@ public class MainHook implements IXposedHookLoadPackage {
     private static void logWriteFile(final String msg) {
         try{
                         synchronized (sLogWriterLock) {
-
                             String ts = new java.text.SimpleDateFormat(
                                     "yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
                                     .format(new java.util.Date());
-
-
                             // system_server can not visit /sdcard
                             java.io.File f = new java.io.File("/data/system", "xposed.txt");
-
-
                             FileWriter writer = new FileWriter(f, true);
                             writer.write(ts + " " + msg + "\n");
                             writer.flush();
@@ -145,8 +130,6 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
         } catch (Throwable t) { XposedBridge.log(TAG + ": write log failed: " + t.getMessage()); }
     }
-
-
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -196,7 +179,10 @@ public class MainHook implements IXposedHookLoadPackage {
                                         try{
                                             logToFile("checkExcessivePowerUsageLPr trigger");
                                         param.setResult(false);
-                                        } catch (Throwable t) {XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());}
+                                        } catch (Throwable t) {
+                                            XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());
+                                            logToFile(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());
+                                        }
                                     }
                                 }
                         );
@@ -220,7 +206,10 @@ public class MainHook implements IXposedHookLoadPackage {
                                             param.args[1] = false;
                                         }
 
-                                        } catch (Throwable t) {XposedBridge.log(TAG + ": updateAppProcessCpuTimeLPr FAILED: " + t.getMessage());}
+                                        } catch (Throwable t) {
+                                            XposedBridge.log(TAG + ": updateAppProcessCpuTimeLPr FAILED: " + t.getMessage());
+                                            logToFile(TAG + ": updateAppProcessCpuTimeLPr FAILED: " + t.getMessage());
+                                        }
                                     }
                                 }
                         );
@@ -242,7 +231,10 @@ public class MainHook implements IXposedHookLoadPackage {
                                         if (param.args != null && param.args.length > 1 && param.args[1] instanceof Boolean) {
                                             param.args[1] = Boolean.FALSE;
                                         }
-                                       } catch (Throwable t) {XposedBridge.log(TAG + ": updatePhantomProcessCpuTimeLPr FAILED: " + t.getMessage());}
+                                       } catch (Throwable t) {
+                                           XposedBridge.log(TAG + ": updatePhantomProcessCpuTimeLPr FAILED: " + t.getMessage());
+                                           logToFile(TAG + ": updatePhantomProcessCpuTimeLPr FAILED: " + t.getMessage());
+                                       }
                                     }
                                 }
                         );
@@ -263,7 +255,10 @@ public class MainHook implements IXposedHookLoadPackage {
                                         try{
                                             logToFile("sendKillExcessiveCpuProfilingTrigger trigger");
                                             param.setResult(null);
-                                        } catch (Throwable t) {XposedBridge.log(TAG + ": sendKillExcessiveCpuProfilingTrigger FAILED: " + t.getMessage());}
+                                        } catch (Throwable t) {
+                                            XposedBridge.log(TAG + ": sendKillExcessiveCpuProfilingTrigger FAILED: " + t.getMessage());
+                                            logToFile(TAG + ": sendKillExcessiveCpuProfilingTrigger FAILED: " + t.getMessage());
+                                        }
                                     }
                                 }
                         );
@@ -292,7 +287,6 @@ public class MainHook implements IXposedHookLoadPackage {
         // 拿到的 NotificationManager.mService 为 null，createNotificationChannel 会 NPE。
 
         hookNotificationManager(lpparam.classLoader);
-//        hookFcmBroadcast(lpparam.classLoader);
         hookBootComplete(lpparam.classLoader);
     }
 
@@ -304,103 +298,65 @@ public class MainHook implements IXposedHookLoadPackage {
             // 时机早于 NotificationManagerService 注册 "notification" binder，
             // 此时永远拿不到 binder（不是反射的问题，是服务还没启动）。
 
-            XposedBridge.hookAllMethods(nms, "enqueueNotificationInternal",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            try{
-                                logToFile("enqueueNotificationInternal trigger\n");
+            XposedHelpers.findAndHookMethod(
+        "com.android.server.notification.NotificationManagerService", // 类名
+                cl,
+        "enqueueNotificationInternal",
+        // 按顺序声明 9 个参数的类型
+                String.class,   // pkg
+                String.class,   // opPkg
+                int.class,      // callingUid
+                int.class,      // callingPid
+                String.class,   // tag
+                int.class,      // id
+                Notification.class, // notification
+                int.class,      // incomingUserId
+                boolean.class,  // postSilently (9 参数版特有)
+                new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    try{
+                    /* android 14.0
+                   8-params,
+                   void enqueueNotificationInternal(final String pkg, final String opPkg, final int callingUid, final int callingPid, final String tag, final int id,
+                                final Notification notification, int incomingUserId)
+                   9-params,
+                   void enqueueNotificationInternal(final String pkg, final String opPkg, final int callingUid, final int callingPid,
+                        final String tag, final int id, final Notification notification, int incomingUserId, boolean postSilently)
 
-                                // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
-                                if (param.args.length > 4 && "fcm_intercept".equals(param.args[4])) return;
+                   10-params,
+                   private boolean enqueueNotificationInternal(final String pkg, final String opPkg, final int callingUid, final int callingPid, final String tag,
+                        final int id, final Notification notification, int incomingUserId, boolean postSilently, PostNotificationTracker tracker)
+                    */
+                    String pkg = (String) param.args[0];
+                    String tag = (String) param.args[4];
 
-                                if (param.args == null || param.args.length <= 6) return;
-                                if (!(param.args[6] instanceof Notification)) return;
+                    logToFile("enqueueNotificationInternal pkg=" + pkg + " tag=" + tag + "\n");
+                    XposedBridge.log(TAG + ": NMS " + pkg);
 
-                                Notification n = (Notification) param.args[6];
-                                if (!isMessageNotification(n)) return;
-    
-                                String pkg = param.args[0] instanceof String ? (String) param.args[0] : null;
-                                String opPkg = (param.args.length > 1 && param.args[1] instanceof String)
-                                        ? (String) param.args[1] : null;
+                    // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
+                    if (param.args.length > 4 && "fcm_intercept".equals(param.args[4])) return;
 
+                    final String fPkg = pkg;
+                    final String fTag = tag;
 
-                                logToFile("enqueueNotificationInternal trigger " + pkg + " " + opPkg + " \n");
-                                if (isDuplicateMsg(pkg, opPkg)) return;
-                                XposedBridge.log(TAG + ": NMS " + pkg);
-
-                                getWorker().post(new Runnable() {
-                                    @Override public void run() {
-
-                                        // FCM 通知类消息在应用处于后台时，由 Google Play services 直接代为展示，
-                                        // 系统不会发送 MESSAGING_EVENT 广播（hookFcmBroadcast 收不到这种消息）。
-                                        // 通过 opPkg 识别 GMS/GSF 代发的通知，补上拦截通知。
-                                        boolean fromGms = "com.google.android.gms".equals(opPkg)
-                                                || "com.google.android.gsf".equals(opPkg);
-                                        boolean gmsOwn = "com.google.android.gms".equals(pkg)
-                                                || "com.google.android.gsf".equals(pkg);
-                                        if (fromGms && !gmsOwn) {
-                                            CharSequence title = n.extras != null
-                                                    ? n.extras.getCharSequence(Notification.EXTRA_TITLE) : null;
-                                            CharSequence text = n.extras != null
-                                                    ? n.extras.getCharSequence(Notification.EXTRA_TEXT) : null;
-                                            callNMS_Reflection(
-                                                    title != null ? title.toString()
-                                                            : (pkg != null ? getAppName(pkg) : "FCM"),
-                                                    text != null ? text.toString() : "",
-                                                    cl);
-                                        }
-                                        String source = "NMS ";
-                                        if (pkg != null) { source = source + getAppName(pkg); }
-                                        wakeScreen(source, cl);
-
-                                    }
-                                });
-
-                            } catch (Throwable t) { XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t); }
+                    getWorker().post(new Runnable() {
+                        @Override public void run() {
+                            callNMS_Reflection(fPkg, fTag, cl);
+                            wakeScreen(fPkg, cl);
                         }
+                    });
+                    } catch (Throwable t) {
+                        XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t);
+                        logToFile("Hooked enqueueNotificationInternal failed: " + t);
                     }
+                }
+            }
             );
-            XposedBridge.log(TAG + ": Hooked enqueueNotificationInternal ✓");
-        } catch (Throwable t) { XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t); }
-    }
-
-
-
-
-
-
-
-    private boolean hasMessagingStyle(Notification n) {
-        try {
-            // 方法1：通过 Class.forName（不依赖 Xposed）
-            Class<?> styleClass = Class.forName("android.app.Notification$MessagingStyle");
-            Method extractMethod = styleClass.getMethod("extractMessagingStyleFromNotification", Notification.class);
-            Object result = extractMethod.invoke(null, n);
-            return result != null;
         } catch (Throwable t) {
-            // Android 10 以下没有这个类
-            return false;
+            XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t);
+            logToFile("Hooked enqueueNotificationInternal failed: " + t);
         }
-    }
-
-    private boolean isMessageNotification(Notification n) {
-        if (n == null) return false;
-        if (Notification.CATEGORY_MESSAGE.equals(n.category)) return true;
-        if (hasMessagingStyle(n)) { return true; }
-        if (n.extras == null) return false;
-        CharSequence text = n.extras.getCharSequence(Notification.EXTRA_TEXT);
-        if (text == null) { return false; // 没有文字内容，不太可能是消息
-        }
-        boolean isOngoing = (n.flags & Notification.FLAG_ONGOING_EVENT) != 0;
-        boolean isGroupSummary = (n.flags & Notification.FLAG_GROUP_SUMMARY) != 0;
-        if (isOngoing || isGroupSummary) { return false; }
-        // 有标题 && 有内容文本 => 大概率是消息
-        boolean hasTitle = n.extras.getCharSequence(Notification.EXTRA_TITLE) != null;
-        return hasTitle;
-//        return n.extras.getCharSequence(Notification.EXTRA_TEXT) != null
-//                && (n.flags & Notification.FLAG_ONGOING_EVENT) == 0
-//                && (n.flags & Notification.FLAG_GROUP_SUMMARY) == 0;
     }
 
     private void wakeScreen(final String source, final ClassLoader cl) {
@@ -438,15 +394,11 @@ public class MainHook implements IXposedHookLoadPackage {
                     lastWake = now;
                     XposedBridge.log(TAG + ": " + source + ", Screen On");
                     AudioManager am = sSystemContext.getSystemService(AudioManager.class);
-                    if (am.getStreamVolume(AudioManager.STREAM_NOTIFICATION) != 0) {
-                        playNotificationSound(cl); // 静音模式下只亮屏，不播放声音
-                    }
                 } catch (Throwable t) {
                     // 降级到 2 参数
                     XposedHelpers.callMethod(pm, "wakeUp", SystemClock.uptimeMillis(), "FCM:" + source);
                     lastWake = now;
                     AudioManager am = sSystemContext.getSystemService(AudioManager.class);
-                    if (am.getStreamVolume(AudioManager.STREAM_NOTIFICATION) != 0) { playNotificationSound(cl); }
                     XposedBridge.log(TAG + ": " + source + ", Screen On");
                 }
             } finally {
@@ -475,99 +427,6 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log("getSystemContext failed: " + t);
         }
         return null;
-    }
-
-    private void playNotificationSound(ClassLoader cl) {
-        try {
-            if (sSystemContext == null) return;
-            Uri soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
-            if (soundUri == null) { XposedBridge.log(TAG + ": no default notification sound"); return; }
-            MediaPlayer mediaPlayer = new MediaPlayer();
-            mediaPlayer.setAudioAttributes(
-                    new AudioAttributes.Builder()
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                            .build()
-            );
-            mediaPlayer.setDataSource(sSystemContext, soundUri);
-            mediaPlayer.prepare();
-            mediaPlayer.start();
-            mediaPlayer.setOnCompletionListener(MediaPlayer::release);
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": play sound failed: " + t);
-        }
-    }
-
-    private void hookFcmBroadcast(ClassLoader cl) {
-        try {
-            Class<?> ams = XposedHelpers.findClass(
-                    "com.android.server.am.ActivityManagerService", cl);
-            XposedBridge.hookAllMethods(ams, "broadcastIntentLocked",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            try {
-                                // 提取 Intent 和调用者信息
-                                Intent intent = null;
-                                String callerPackage = null;
-                                Integer callingUid = null;
-
-                                for (Object arg : param.args) {
-                                    if (arg instanceof Intent) {
-                                        intent = (Intent) arg;
-                                    } else if (arg instanceof String) {
-                                        String str = (String) arg;
-                                        if (str != null && str.contains(".") && str.length() > 5) {
-                                            // 可能是包名
-                                            callerPackage = str;
-                                        }
-                                    } else if (arg instanceof Integer && (Integer) arg >= 10000) {
-                                        callingUid = (Integer) arg;
-                                    }
-                                }
-
-                                if (intent == null) return;
-
-                                String action = intent.getAction();
-                                if (!ACTION_FCM.equals(action) && !ACTION_GCM.equals(action)) { return; }
-
-                                // 获取目标包名
-                                String targetPackage = intent.getPackage();
-                                ComponentName component = intent.getComponent();
-                                if (targetPackage == null && component != null) { targetPackage = component.getPackageName(); }
-
-                                // 如果目标包名为空，尝试通过 UID 反查
-                                if (targetPackage == null && callingUid != null) { targetPackage = getPackageNameByUid(callingUid); }
-
-                                if (targetPackage == null) { XposedBridge.log(TAG + ": target package is null"); return; }
-                                String appName = getAppName(targetPackage);
-                                String displayText = appName + " FCM ";
-                                String title = null;
-                                String body = null;
-
-                                // 获取消息内容（如果有）
-                                Bundle extras = intent.getExtras();
-                                if (extras != null) {
-                                    String[] titleKeys = {"gcm.n.title", "title", "notification.title"};
-                                    String[] bodyKeys = {"gcm.n.body", "body", "notification.body"};
-                                    for (String key : titleKeys) { if (extras.containsKey(key)) { title = extras.getString(key); } }
-                                    for (String key2: bodyKeys) { if (extras.containsKey(key2)) { body = extras.getString(key2); } }
-                                    if (title != null){ displayText = displayText + "title: " + title; }
-                                    if (body != null){ displayText = displayText + " content: " + body; }
-                                }
-                                // showToast(cl, displayText);
-                                callNMS_Reflection(appName, displayText, cl);
-                                wakeScreen("FCM " + appName, cl);
-                                XposedBridge.log(TAG + ": FCM " + appName + " (" + targetPackage + ")");
-                            } catch (Throwable t) {
-                                XposedBridge.log(TAG + ": Error in hook: " + t);
-                            }
-                        }
-                    });
-            XposedBridge.log(TAG + ": Hooked broadcastIntentLocked ✓");
-        } catch (Throwable t) {
-            XposedBridge.log("Hooked broadcastIntentLocked failed: " + t);
-        }
     }
 
     // ── Boot-complete test trigger ──────────────────────────────
@@ -609,64 +468,6 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": Hooked finishBooting ✓");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": Hooked finishBooting failed: " + t);
-        }
-    }
-
-    private String getAppName(String packageName) {
-        try {
-            if (sSystemContext == null) return packageName;
-            PackageManager pm = sSystemContext.getPackageManager();
-            ApplicationInfo appInfo = pm.getApplicationInfo(packageName, 0);
-            return pm.getApplicationLabel(appInfo).toString();
-        } catch (Exception e) {
-            XposedBridge.log(TAG + ": getAppName failed for " + packageName + ": " + e);
-            return packageName;
-        }
-    }
-
-    // 通过 UID 获取包名
-    private String getPackageNameByUid(int uid) {
-        try {
-            if (sSystemContext == null) return null;
-            PackageManager pm = sSystemContext.getPackageManager();
-            String[] packages = pm.getPackagesForUid(uid);
-            if (packages != null && packages.length > 0) {
-                return packages[0];
-            }
-        } catch (Exception e) {
-            XposedBridge.log(TAG + ": getPackageNameByUid failed: " + e);
-        }
-        return null;
-    }
-
-    private void showToast(ClassLoader cl, String message) {
-        try {
-            // 在 system_server 中显示 Toast 需要使用系统 UI 线程
-            // 方式1：通过 Handler 在主线程显示
-            final String finalMessage = message;
-
-            // 获取 ActivityThread 主线程 Handler
-            Class<?> activityThreadClass = XposedHelpers.findClass("android.app.ActivityThread", ClassLoader.getSystemClassLoader());
-            Object at = XposedHelpers.callStaticMethod(activityThreadClass, "currentActivityThread");
-            Object mainHandler = XposedHelpers.callMethod(at, "getHandler");
-
-            // 在主线程显示 Toast
-            XposedHelpers.callMethod(mainHandler, "post", new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        if (sSystemContext == null) return;
-                        // 使用系统 Toast 显示
-                        Toast toast = Toast.makeText(sSystemContext, finalMessage, Toast.LENGTH_LONG);
-                        toast.show();
-                        XposedBridge.log(TAG + ": " + finalMessage + "\n");
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + ": Toast display failed: " + t);
-                    }
-                }
-            });
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": showToast failed: " + t);
         }
     }
 
@@ -731,18 +532,5 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": getSystemNotificationManager failed: " + t2);
         }
         return null;
-    }
-
-    private boolean isDuplicateMsg(String pkg, String opPkg) {
-        String key = (pkg == null ? "?" : pkg) + "|" + (opPkg == null ? "?" : opPkg);
-        long now = SystemClock.elapsedRealtime();
-        synchronized (sLastWakeByApp) {                       // 用 map 本身当锁，粒度足够粗也最简单
-            Long last = sLastWakeByApp.get(key);
-            if (last != null && now - last < DEBOUNCE_WINDOW_MS) {
-                return true;                                 // 3 秒内同源重复 → 过滤
-            }
-            sLastWakeByApp.put(key, now);                     // 首次 / 超时 → 更新时间戳并放行
-            return false;
-        }
     }
 }
