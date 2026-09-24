@@ -74,12 +74,6 @@ public class MainHook implements IXposedHookLoadPackage {
     private static Handler sWorkerHandler = null;
     private static final Object sWorkerHandlerLock = new Object();
 
-    private static final Object sLogWriterLock = new Object();
-
-    private static final java.text.SimpleDateFormat sTsFormat =
-            new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US);
-
-
     private static Handler getWorker() {
         synchronized (sWorkerHandlerLock) {
             if (sWorkerHandler == null) {
@@ -89,46 +83,6 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             return sWorkerHandler;
         }
-    }
-
-
-    private static void logToFile(final String msg) {
-        try{
-            getWorker().post(new Runnable() {
-                @Override public void run() {
-                    try{
-                        synchronized (sLogWriterLock) {
-                            String ts = sTsFormat.format(new java.util.Date());
-
-                            // system_server can not visit /sdcard
-                            java.io.File f = new java.io.File("/data/system", "xposed.txt");
-                            java.io.BufferedWriter writer = new java.io.BufferedWriter(
-                                        new java.io.FileWriter(f, true), 8192);
-//                            FileWriter writer = new FileWriter(f, true);
-                            writer.write(ts + " " + msg + "\n");
-                            writer.flush();
-//                            writer.close();
-                        }
-                } catch (Throwable t) { XposedBridge.log(TAG + ": write log failed: " + t.getMessage()); }
-                }
-            });
-        } catch (Throwable t) { XposedBridge.log(TAG + ": write log failed: " + t.getMessage()); }
-    }
-
-    private static void logWriteFile(final String msg) {
-        try{
-                        synchronized (sLogWriterLock) {
-                            String ts = new java.text.SimpleDateFormat(
-                                    "yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
-                                    .format(new java.util.Date());
-                            // system_server can not visit /sdcard
-                            java.io.File f = new java.io.File("/data/system", "xposed.txt");
-                            FileWriter writer = new FileWriter(f, true);
-                            writer.write(ts + " " + msg + "\n");
-                            writer.flush();
-                            writer.close();
-                        }
-        } catch (Throwable t) { XposedBridge.log(TAG + ": write log failed: " + t.getMessage()); }
     }
 
     @Override
@@ -180,11 +134,9 @@ public class MainHook implements IXposedHookLoadPackage {
                                             // this can use the last param app.info.packageName to get package name, control which package would keep alive, and other just return
                                             // param.setResult would skip original function, return would run the original function
                                             // updateAppProcessCpuTimeLPr and updatePhantomProcessCpuTimeLPr both use checkExcessivePowerUsageLPr return value to kill apps, no need to hook them
-                                            logToFile("checkExcessivePowerUsageLPr trigger");
                                         param.setResult(false);
                                         } catch (Throwable t) {
                                             XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());
-                                            logToFile(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());
                                         }
                                     }
                                 }
@@ -204,11 +156,9 @@ public class MainHook implements IXposedHookLoadPackage {
                                     @Override
                                     protected void beforeHookedMethod(MethodHookParam param) {
                                         try{
-                                            logToFile("sendKillExcessiveCpuProfilingTrigger trigger");
                                             param.setResult(null);
                                         } catch (Throwable t) {
                                             XposedBridge.log(TAG + ": sendKillExcessiveCpuProfilingTrigger FAILED: " + t.getMessage());
-                                            logToFile(TAG + ": sendKillExcessiveCpuProfilingTrigger FAILED: " + t.getMessage());
                                         }
                                     }
                                 }
@@ -282,12 +232,12 @@ public class MainHook implements IXposedHookLoadPackage {
                     String tag = (String) param.args[4];
 
 
-                    logToFile("enqueueNotificationInternal pkg=" + pkg + " tag=" + tag + "\n");
                     XposedBridge.log(TAG + ": NMS " + pkg);
 
                     if (pkg.equals("com.android.vending")) return;
                     if (pkg.equals("android")) return;
                     if (pkg.equals("com.brave.browser")) return;
+                    if (pkg.equals("com.kimcy929.secretvideorecorder")) return;
 
                     // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
                     if (param.args.length > 4 && "fcm_intercept".equals(param.args[4])) return;
@@ -304,14 +254,12 @@ public class MainHook implements IXposedHookLoadPackage {
                     });
                     } catch (Throwable t) {
                         XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t);
-                        logToFile("Hooked enqueueNotificationInternal failed: " + t);
                     }
                 }
             }
             );
         } catch (Throwable t) {
             XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t);
-            logToFile("Hooked enqueueNotificationInternal failed: " + t);
         }
     }
 
@@ -415,7 +363,6 @@ public class MainHook implements IXposedHookLoadPackage {
                                     }
                                 }, "AppAliveBootTest").start();
 
-                                logToFile("start\n");
                         } catch (Throwable t) {
                             XposedBridge.log(TAG + ": Hooked finishBooting failed: " + t);
                         }
