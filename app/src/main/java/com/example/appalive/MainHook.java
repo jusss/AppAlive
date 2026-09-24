@@ -177,6 +177,9 @@ public class MainHook implements IXposedHookLoadPackage {
                                     @Override
                                     protected void beforeHookedMethod(MethodHookParam param) {
                                         try{
+                                            // this can use the last param app.info.packageName to get package name, control which package would keep alive, and other just return
+                                            // param.setResult would skip original function, return would run the original function
+                                            // updateAppProcessCpuTimeLPr and updatePhantomProcessCpuTimeLPr both use checkExcessivePowerUsageLPr return value to kill apps, no need to hook them
                                             logToFile("checkExcessivePowerUsageLPr trigger");
                                         param.setResult(false);
                                         } catch (Throwable t) {
@@ -189,58 +192,6 @@ public class MainHook implements IXposedHookLoadPackage {
                         XposedBridge.log(TAG + ": Hooked checkExcessivePowerUsageLPr ✓");
                     } catch (Throwable t) {
                         XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());
-                    }
-                };
-
-                if (method.getName().equals("updateAppProcessCpuTimeLPr")){
-                    // ─── Hook 2: updateAppProcessCpuTimeLPr → set doCpuKills = false ───
-                    try {
-                        XposedBridge.hookMethod(method,
-                                new XC_MethodHook() {
-                                    @Override
-                                    protected void beforeHookedMethod(MethodHookParam param) {
-                                        try{
-
-                                            logToFile("updateAppProcessCpuTimeLPr trigger");
-                                        if (param.args.length > 1 && param.args[1] instanceof Boolean) {
-                                            param.args[1] = false;
-                                        }
-
-                                        } catch (Throwable t) {
-                                            XposedBridge.log(TAG + ": updateAppProcessCpuTimeLPr FAILED: " + t.getMessage());
-                                            logToFile(TAG + ": updateAppProcessCpuTimeLPr FAILED: " + t.getMessage());
-                                        }
-                                    }
-                                }
-                        );
-                        XposedBridge.log(TAG + ": Hooked updateAppProcessCpuTimeLPr ✓");
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + ": updateAppProcessCpuTimeLPr FAILED: " + t.getMessage());
-                    }
-                };
-
-                if (method.getName().equals("updatePhantomProcessCpuTimeLPr")){
-                    // ─── Hook 3:  updatePhantomProcessCpuTimeLPr → set doCpuKills = false ───
-                    try {
-                        XposedBridge.hookMethod(method,
-                                new XC_MethodHook() {
-                                    @Override
-                                    protected void beforeHookedMethod(MethodHookParam param) {
-                                       try{
-                                        logToFile("updatePhantomProcessCpuTimeLPr trigger");
-                                        if (param.args != null && param.args.length > 1 && param.args[1] instanceof Boolean) {
-                                            param.args[1] = Boolean.FALSE;
-                                        }
-                                       } catch (Throwable t) {
-                                           XposedBridge.log(TAG + ": updatePhantomProcessCpuTimeLPr FAILED: " + t.getMessage());
-                                           logToFile(TAG + ": updatePhantomProcessCpuTimeLPr FAILED: " + t.getMessage());
-                                       }
-                                    }
-                                }
-                        );
-                        XposedBridge.log(TAG + ": Hooked updatePhantomProcessCpuTimeLPr ✓");
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + ": updatePhantomProcessCpuTimeLPr FAILED: " + t.getMessage());
                     }
                 };
 
@@ -272,7 +223,6 @@ public class MainHook implements IXposedHookLoadPackage {
                     // ─── Hook 5: checkExcessivePowerUsageLocked → no-op ───
                     // this is in lineageos 18.1
                     try {
-                        logToFile("checkExcessivePowerUsageLocked trigger");
                         XposedBridge.hookMethod(method, XC_MethodReplacement.DO_NOTHING);
                         XposedBridge.log(TAG + ": Hooked checkExcessivePowerUsageLocked ✓");
                     } catch (Throwable t) {
@@ -337,6 +287,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
                     if (pkg.equals("com.android.vending")) return;
                     if (pkg.equals("android")) return;
+                    if (pkg.equals("com.brave.browser")) return;
 
                     // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
                     if (param.args.length > 4 && "fcm_intercept".equals(param.args[4])) return;
@@ -347,7 +298,8 @@ public class MainHook implements IXposedHookLoadPackage {
                     getWorker().post(new Runnable() {
                         @Override public void run() {
                             callNMS_Reflection(fPkg, fTag, cl);
-                            wakeScreen(fPkg, cl);
+                            // NMS and PMS in one thread would be dead lock, cause reboot
+//                            wakeScreen(fPkg, cl);
                         }
                     });
                     } catch (Throwable t) {
