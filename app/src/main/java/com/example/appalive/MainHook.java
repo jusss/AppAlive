@@ -74,6 +74,9 @@ public class MainHook implements IXposedHookLoadPackage {
     private static Handler sWorkerHandler = null;
     private static final Object sWorkerHandlerLock = new Object();
 
+    private static volatile PowerManager spm = null;
+
+
     private static Handler getWorker() {
         synchronized (sWorkerHandlerLock) {
             if (sWorkerHandler == null) {
@@ -248,6 +251,9 @@ public class MainHook implements IXposedHookLoadPackage {
                     if (pkg.equals("com.brave.browser")) return;
                     if (pkg.equals("com.kimcy929.secretvideorecorder")) return;
 
+                    Notification n = (Notification) param.args[6];
+                    if (!isMessageNotification(n)) return;
+
 //                    XposedBridge.log(TAG + ": NMS " + pkg);
 
                     // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
@@ -258,9 +264,9 @@ public class MainHook implements IXposedHookLoadPackage {
 
                     getWorker().post(new Runnable() {
                         @Override public void run() {
-                            callNMS_Reflection(fPkg, fTag, cl);
+//                            callNMS_Reflection(fPkg, fTag, cl);
                             // NMS and PMS in one thread would be dead lock, cause reboot
-//                            wakeScreen(fPkg, cl);
+                            wakeScreen("pkg: " + fPkg + ", tag: " + fTag, cl);
                         }
                     });
                     } catch (Throwable t) {
@@ -280,45 +286,39 @@ public class MainHook implements IXposedHookLoadPackage {
         // capture-and-post design: no IPC/wakeUp can ever run on a system_server
         // hook thread (android.display / binder) again.
         if (!"AppAliveWorker".equals(Thread.currentThread().getName())) {
-            final ClassLoader fCl = cl;
-            getWorker().post(new Runnable() {
-                @Override public void run() { wakeScreen(source, fCl); }
-            });
+//            final ClassLoader fCl = cl;
+//            getWorker().post(new Runnable() {
+//                @Override public void run() { wakeScreen(source, fCl); }
+//            });
             return;
         }
         if (sSystemContext == null) return;
         long now = SystemClock.elapsedRealtime();
         if (now - lastWake < 3000) return;                 // IMPORTANT: both hooks fire for one message
         lastWake = now;
+
         try {
-            PowerManager pm = (PowerManager) sSystemContext.getSystemService(Context.POWER_SERVICE);
-            if (pm == null) return;
-            try {
-                boolean isInteractive = (boolean) XposedHelpers.callMethod(pm, "isInteractive");
-                if (isInteractive) return; // 检查屏幕是否已亮
-                TelephonyManager tm = sSystemContext.getSystemService(TelephonyManager.class);
-                if (tm.getCallState() != TelephonyManager.CALL_STATE_IDLE) return;
-            } catch (Throwable t) { }
-            long origId = Binder.clearCallingIdentity(); // 关键：清除调用方身份，使用 system_server 的权限
-            try {
-                // 尝试 3 参数 wakeUp
-                try {
-                    XposedHelpers.callMethod(pm, "wakeUp", SystemClock.uptimeMillis(), 1, // WAKE_REASON_APPLICATION
-                            "FCM:" + source
-                    );
-                    lastWake = now;
-                    XposedBridge.log(TAG + ": " + source + ", Screen On");
-                    AudioManager am = sSystemContext.getSystemService(AudioManager.class);
-                } catch (Throwable t) {
-                    // 降级到 2 参数
-                    XposedHelpers.callMethod(pm, "wakeUp", SystemClock.uptimeMillis(), "FCM:" + source);
-                    lastWake = now;
-                    AudioManager am = sSystemContext.getSystemService(AudioManager.class);
-                    XposedBridge.log(TAG + ": " + source + ", Screen On");
+            PowerManager pms_obj = spm;
+            if (pms_obj == null) {
+                pms_obj = getSystemPowerManager(cl);
+                if (pms_obj == null) {
+                    XposedBridge.log(TAG + ": PowerManager got failed, skip wake up screen");
+                    return;
                 }
-            } finally {
-                Binder.restoreCallingIdentity(origId); // 恢复原始调用方身份
+                spm = pms_obj;
             }
+
+            boolean isInteractive = (boolean) XposedHelpers.callMethod(pms_obj, "isInteractive");
+            if (isInteractive) return; // 检查屏幕是否已亮
+
+            PowerManager.WakeLock wakeLock = pms_obj.newWakeLock(
+    PowerManager.FULL_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP,
+            "AppAlive:WakeScreen"
+            );
+
+            // Acquire with a timeout to be safe
+            wakeLock.acquire(5000); // 5 seconds
+            XposedBridge.log(TAG + ": wake up screen by " + source);
         } catch (Throwable t) {
             XposedBridge.log("wakeScreen failed: " + t);
         }
@@ -446,5 +446,70 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": getSystemNotificationManager failed: " + t2);
         }
         return null;
+    }
+
+    private PowerManager getSystemPowerManager(ClassLoader cl) {
+        try {
+            if (sSystemContext == null) return null;
+            Object pm = sSystemContext.getSystemService(Context.POWER_SERVICE);
+            if (pm instanceof PowerManager) {
+                XposedBridge.log(TAG + ": Got PowerManager via getSystemService ✅");
+                return (PowerManager) pm;
+            }
+        } catch (Throwable t2) {
+            XposedBridge.log(TAG + ": get PowerManager failed: " + t2);
+        }
+        return null;
+    }
+
+    private boolean isMessageNotification(Notification n) {
+        if (n == null) return false;
+        if (Notification.CATEGORY_MESSAGE.equals(n.category)) return true;
+        if (hasMessagingStyle(n)) {
+            return true;
+        }
+
+        if (n.extras == null) return false;
+
+        CharSequence text = n.extras.getCharSequence(Notification.EXTRA_TEXT);
+        if (text == null) {
+            return false; // 没有文字内容，不太可能是消息
+        }
+
+        boolean isOngoing = (n.flags & Notification.FLAG_ONGOING_EVENT) != 0;
+        boolean isGroupSummary = (n.flags & Notification.FLAG_GROUP_SUMMARY) != 0;
+
+        if (isOngoing || isGroupSummary) {
+            return false;
+        }
+
+        // 有标题 && 有内容文本 => 大概率是消息
+        boolean hasTitle = n.extras.getCharSequence(Notification.EXTRA_TITLE) != null;
+        return hasTitle;
+
+//        return n.extras.getCharSequence(Notification.EXTRA_TEXT) != null
+//                && (n.flags & Notification.FLAG_ONGOING_EVENT) == 0
+//                && (n.flags & Notification.FLAG_GROUP_SUMMARY) == 0;
+    }
+
+    private boolean hasMessagingStyle(Notification n) {
+        try {
+            // 方法1：通过 Class.forName（不依赖 Xposed）
+            Class<?> styleClass = Class.forName("android.app.Notification$MessagingStyle");
+            Method extractMethod = styleClass.getMethod(
+                    "extractMessagingStyleFromNotification",
+                    Notification.class
+            );
+            Object result = extractMethod.invoke(null, n);
+            return result != null;
+
+        } catch (ClassNotFoundException e) {
+            // Android 10 以下没有这个类
+            return false;
+        } catch (NoSuchMethodException e) {
+            return false;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 }
