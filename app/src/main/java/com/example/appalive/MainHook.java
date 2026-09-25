@@ -213,6 +213,51 @@ public class MainHook implements IXposedHookLoadPackage {
             // 时机早于 NotificationManagerService 注册 "notification" binder，
             // 此时永远拿不到 binder（不是反射的问题，是服务还没启动）。
 
+            // beforeHookedMethod on enqueueNotificationInternal, get into this method, will get NMS notification lock,
+            //
+            /*
+            T0: 系统线程进入 enqueueNotificationInternal，获取 mNotificationLock
+            T1: 系统线程执行到 beforeHookedMethod（hook 注入点）
+            T2: hook 里 getWorker().post(...) 把任务丢给 worker
+            T3: beforeHookedMethod 返回
+            T4: 系统线程继续执行 enqueueNotificationInternal 方法体（仍然持有 mNotificationLock）
+                   ↑ 这中间可能有耗时操作，锁一直没释放
+            T5: worker 线程被唤醒，执行 wakeScreen → pm.isInteractive()
+                   ↑ 此时 NMS 锁可能还持有！
+            T6: worker 线程持有"逻辑上的 NMS 锁等待"关系 → 等待 PMS 锁
+
+
+            注意：beforeHookedMethod 是 Xposed 在原方法真正开始执行之前调用的。但 Xposed 的 hook 注入点通常是在方法入口，此时如果原方法是 synchronized 的，锁已经获取了（因为 synchronized 是方法级别的，锁在方法入口就拿了）。beforeHookedMethod 返回后，原方法的方法体才开始执行，锁一直持有到方法体结束。
+            所以：worker 线程完全可能在一个“NMS 锁仍被系统线程持有”的时间窗口内去调用 isInteractive()。
+            post 到 worker 解决的是“在 hook 线程上阻塞”的问题，但它没有解决“在 NMS 锁被持有的期间，另一个线程发起 PMS Binder 调用”的问题。
+
+锁的死锁条件不是“同一个线程同时持有两把锁”，而是：
+
+线程 A（系统线程）持有 NMS 锁
+
+线程 B（worker 线程）调用 PMS，PMS 内部需要 PMS 锁
+
+某个线程 C 持有 PMS 锁，并且需要 NMS 锁
+
+只要这三个条件在时间上重叠，就会死锁。worker 线程的 isInteractive() 调用和系统线程持有 NMS 锁的时间窗口重叠，就构成条件。
+
+callNMS_Reflection 调用 nms_obj.notify(...)，这会重新进入 NMS。虽然 pkg=="android" 的守卫阻止了递归，但 notify 本身会尝试获取 NMS 锁。此时 worker 线程：
+
+ 持有 NMS 锁 -> 持有 PMS 锁（isInteractive 返回后可能还没释放？） → 尝试获取 NMS 锁
+或者反过来。这直接构成 worker 线程和系统线程之间的锁循环。
+
+真正安全的做法
+要让 worker 线程的 PMS 调用永远不会和 NMS 锁重叠，只有两条路：
+
+不在 beforeHookedMethod 里做任何事，只记录，让 worker 异步执行——但如上所述，worker 仍可能和系统线程重叠，只是概率低。这不是根本解法。
+
+在 afterHookedMethod 里 post。此时 enqueueNotificationInternal 已经返回，NMS 锁已经释放。这是根本解法：
+
+afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经退出，NMS 锁已释放。worker 线程执行 isInteractive() 时，系统里没有任何线程因为这次 NMS 调用而持有 NMS 锁，锁循环的其中一条边被切断。
+
+             */
+
+
             XposedHelpers.findAndHookMethod(
         "com.android.server.notification.NotificationManagerService", // 类名
                 cl,
@@ -229,7 +274,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 boolean.class,  // postSilently (9 参数版特有)
                 new XC_MethodHook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void afterHookedMethod(MethodHookParam param) {
                     try{
                     /* android 14.0
                    8-params,
@@ -251,21 +296,20 @@ public class MainHook implements IXposedHookLoadPackage {
                     if (pkg.equals("com.brave.browser")) return;
                     if (pkg.equals("com.kimcy929.secretvideorecorder")) return;
 
-                    Notification n = (Notification) param.args[6];
-                    if (!isMessageNotification(n)) return;
-
-//                    XposedBridge.log(TAG + ": NMS " + pkg);
-
                     // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
-                    if (param.args.length > 4 && "fcm_intercept".equals(param.args[4])) return;
+                    if ("fcm_intercept".equals(param.args[4])) return;
 
                     final String fPkg = pkg;
                     final String fTag = tag;
 
                     getWorker().post(new Runnable() {
                         @Override public void run() {
+                            Notification n = (Notification) param.args[6];
+                            if (!isMessageNotification(n)) return;
+
+//                    XposedBridge.log(TAG + ": NMS " + pkg);
+
 //                            callNMS_Reflection(fPkg, fTag, cl);
-                            // NMS and PMS in one thread would be dead lock, cause reboot
                             wakeScreen("pkg: " + fPkg + ", tag: " + fTag, cl);
                         }
                     });
@@ -316,9 +360,9 @@ public class MainHook implements IXposedHookLoadPackage {
             "AppAlive:WakeScreen"
             );
 
+            XposedBridge.log(TAG + ": wake up screen by " + source);
             // Acquire with a timeout to be safe
             wakeLock.acquire(5000); // 5 seconds
-            XposedBridge.log(TAG + ": wake up screen by " + source);
         } catch (Throwable t) {
             XposedBridge.log("wakeScreen failed: " + t);
         }
