@@ -134,7 +134,19 @@ public class MainHook implements IXposedHookLoadPackage {
                                             // this can use the last param app.info.packageName to get package name, control which package would keep alive, and other just return
                                             // param.setResult would skip original function, return would run the original function
                                             // updateAppProcessCpuTimeLPr and updatePhantomProcessCpuTimeLPr both use checkExcessivePowerUsageLPr return value to kill apps, no need to hook them
-                                        param.setResult(false);
+
+                                            Object app = param.args[param.args.length - 1];
+                                            if (app == null) {
+                                                return;
+                                            }
+                                            if (app.getClass().getName().equals("com.android.server.am.ProcessRecord")){
+                                                Object info = XposedHelpers.getObjectField(app, "info");
+                                                String packageName = (String) XposedHelpers.getObjectField(info, "packageName");
+                                                if (KeepAliveConfig.contains(packageName)) {
+                                                    XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr skip: " + packageName);
+                                                    param.setResult(false);
+                                                }
+                                            }
                                         } catch (Throwable t) {
                                             XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());
                                         }
@@ -231,13 +243,12 @@ public class MainHook implements IXposedHookLoadPackage {
                     String pkg = (String) param.args[0];
                     String tag = (String) param.args[4];
 
-
-                    XposedBridge.log(TAG + ": NMS " + pkg);
-
                     if (pkg.equals("com.android.vending")) return;
                     if (pkg.equals("android")) return;
                     if (pkg.equals("com.brave.browser")) return;
                     if (pkg.equals("com.kimcy929.secretvideorecorder")) return;
+
+//                    XposedBridge.log(TAG + ": NMS " + pkg);
 
                     // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
                     if (param.args.length > 4 && "fcm_intercept".equals(param.args[4])) return;
