@@ -145,15 +145,24 @@ public class MainHook implements IXposedHookLoadPackage {
                                             if (app.getClass().getName().equals("com.android.server.am.ProcessRecord")){
                                                 Object info = XposedHelpers.getObjectField(app, "info");
                                                 String packageName = (String) XposedHelpers.getObjectField(info, "packageName");
-                                                // dynamic list: added on app resume, removed when task swiped away in recents
-                                                // (seeded at boot from KeepAliveConfig). see ProtectedApps.
-                                                if (ProtectedApps.contains(packageName)) {
+                                                // ── Option A: protection = "app has a Recents card right now" ──
+                                                // protected ⇔ package has a task in system RecentTasks.mTasks.
+                                                // open app → card exists → skip kill;
+                                                // swipe / Clear-all / recents-trim → card gone → system may kill.
+                                                // (spec: wechat can die if it has no recents card)
+                                                if (isProtectedByRecents(param.thisObject, packageName)) {
                                                     XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr skip: " + packageName);
+                                                    XposedBridge.log(TAG + ": recents packages: " + dumpRecentsPackages());
                                                     param.setResult(false);
                                                 }
+                                                // ── old impl kept for rollback: file/DEFAULTS-seeded event set ──
+                                                // if (ProtectedApps.contains(packageName)) {
+                                                //     XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr skip: " + packageName);
+                                                //     param.setResult(false);
+                                                // }
                                             }
-                                            // debug
-                                            ProtectedApps.dump();
+                                            // debug: dump() belonged to the old ProtectedApps impl
+                                            // ProtectedApps.dump();
                                         } catch (Throwable t) {
                                             XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());
                                         }
@@ -201,12 +210,14 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         };
 
-        // dynamic keep-alive: seed once from file/defaults, then maintained by
-        // app-resume / recents-swipe hooks below
-        ProtectedApps.seedIfNeeded();
-
-        hookAppResumed(lpparam.classLoader);
-        hookTaskRemovedFromRecents(lpparam.classLoader);
+        // ── old event-driven keep-alive (ProtectedApps) — disabled, kept for rollback ──
+        // seeded once from KeepAliveConfig file/DEFAULTS, then maintained by the
+        // app-resume / recents-swipe hooks below. Replaced by Option A
+        // (isProtectedByRecents): the system's own RecentTasks list is the source of
+        // truth — no custom list, no file, no config.
+        // ProtectedApps.seedIfNeeded();
+        // hookAppResumed(lpparam.classLoader);
+        // hookTaskRemovedFromRecents(lpparam.classLoader);
 
         // 注意：不要在 handleLoadPackage 里调用 callNMS_Reflection 做启动测试。
         // 此时代码运行在系统启动早期，"notification" 服务尚未注册，
@@ -307,6 +318,149 @@ public class MainHook implements IXposedHookLoadPackage {
         }
         if (!hooked) XposedBridge.log(TAG + ": hookTaskRemovedFromRecents: no supervisor class found");
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ── Option A: "is this package protected?" = "does it have a Recents card?" ──
+    //
+    // No custom list at all. At check time (system_server's 5-min excessive-CPU
+    // audit, CHECK_EXCESSIVE_POWER_USE_MSG → checkExcessivePowerUsage → this hook),
+    // walk the system's LIVE recents list and see if any task belongs to the package.
+    //
+    //   lifecycle (all owned by the system, nothing for us to maintain):
+    //     app opened / resumed      → recents add(Task)   → card exists → protected
+    //     user swipes card / Clear all → recents remove(Task) → card gone → can die
+    //     recents cap trim (48, ActivityManager.getMaxRecentTasksStatic)
+    //                               → oldest tasks silently dropped → can die
+    //     reboot                    → recents persisted to disk & restored → protection survives
+    //
+    // verified field paths (android-14.0.0_r1):
+    //   ActivityManagerService.mActivityTaskManager      AMS.java:1535  (public ATMS)
+    //   ActivityTaskManagerService.mRecentTasks          ATMS.java:442  (private RecentTasks)
+    //   RecentTasks.mTasks                               RT.java:181    (private final ArrayList<Task>)
+    //   Task.getBaseIntent()                             Task.java:1324
+    //   AOSP's own package extraction: task.getBaseIntent().getComponent().getPackageName()
+    //     (same pattern at RecentTasks.java:1854-1856)
+    //
+    // cost: ≤48 elements, ~µs each, once per 5 minutes ≈ negligible (measured
+    // against the surrounding audit which iterates every app process). No locks
+    // taken, no binder, no I/O → cannot stall the system_server thread.
+    //
+    // failure mode: if any reflection step fails (OEM ROM drift), log ONCE and
+    // return false → fail-open (nothing protected, system free to kill), the
+    // safe direction for this module. A repeated failure every 5 min does not
+    // spam the log thanks to the once-guard.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // cached reflection handles — system_server is a long-lived process, the
+    // RecentTasks instance is created once at boot and never replaced
+    private static volatile boolean sRecentsResolved = false;
+    private static Object sRecentTasks = null;          // RecentTasks instance
+    private static Field sTasksField = null;            // RecentTasks.mTasks
+    private static volatile boolean sRecentsFailed = false; // log-once guard
+
+    /**
+     * Option A check: does {@code packageName} currently have a task in recents?
+     * Called from the checkExcessivePowerUsageLPr hook ( AMS check cadence:
+     * every 5 min, under mProcLock ). Pure in-memory scan, no blocking calls.
+     */
+    private static boolean isProtectedByRecents(Object ams, String packageName) {
+        if (packageName == null || packageName.isEmpty()) return false;
+
+        if (!sRecentsResolved) {
+            if (!resolveRecents(ams)) {
+                if (!sRecentsFailed) {
+                    sRecentsFailed = true;
+                    XposedBridge.log(TAG + ": isProtectedByRecents: resolve FAILED, "
+                            + "fail-open (nothing protected). Will not retry-log.");
+                }
+                return false;
+            }
+            sRecentsResolved = true;
+            XposedBridge.log(TAG + ": isProtectedByRecents: resolved RecentTasks ✓ ("
+                    + sRecentTasks.getClass().getName() + ")");
+        }
+
+        try {
+            @SuppressWarnings("unchecked")
+            java.util.ArrayList<Object> tasks =
+                    (java.util.ArrayList<Object>) sTasksField.get(sRecentTasks);
+            if (tasks == null) return false;
+            for (int i = 0; i < tasks.size(); i++) {
+                Object task = tasks.get(i);
+                if (task == null) continue;
+                Intent baseIntent = (Intent) XposedHelpers.callMethod(task, "getBaseIntent");
+                if (baseIntent == null) continue;
+                ComponentName cn = baseIntent.getComponent();
+                if (cn == null) continue;
+                if (packageName.equals(cn.getPackageName())) return true;
+            }
+        } catch (Throwable t) {
+            if (!sRecentsFailed) {
+                sRecentsFailed = true;
+                XposedBridge.log(TAG + ": isProtectedByRecents scan FAILED: " + t);
+            }
+            return false;
+        }
+        return false;
+    }
+
+    /**
+     * Debug dump: all packages that currently have a Recents card, in recents
+     * order (most recent first). Logged right after every "skip" line so you
+     * can see exactly which cards earned the skip.
+     * Preconditions when called: recents already resolved successfully (the
+     * caller only runs this on the protected path, after isProtectedByRecents
+     * returned true). Reuses the cached fields; no resolution, no locks.
+     */
+    private static String dumpRecentsPackages() {
+        StringBuilder sb = new StringBuilder("[");
+        try {
+            @SuppressWarnings("unchecked")
+            java.util.ArrayList<Object> tasks =
+                    (java.util.ArrayList<Object>) sTasksField.get(sRecentTasks);
+            if (tasks == null) return sb.append("null]").toString();
+            for (int i = 0; i < tasks.size(); i++) {
+                Object task = tasks.get(i);
+                if (task == null) continue;
+                try {
+                    Intent baseIntent = (Intent) XposedHelpers.callMethod(task, "getBaseIntent");
+                    if (baseIntent == null || baseIntent.getComponent() == null) continue;
+                    if (sb.length() > 1) sb.append(", ");
+                    sb.append(baseIntent.getComponent().getPackageName());
+                } catch (Throwable perTask) {
+                    // one weird task must not break the whole dump
+                }
+            }
+        } catch (Throwable t) {
+            return sb.append("DUMP_FAILED: ").append(t.getMessage()).append(']').toString();
+        }
+        return sb.append(']').toString();
+    }
+
+    /** One-time reflective resolve: AMS.mActivityTaskManager.mRecentTasks + its mTasks field. */
+    private static boolean resolveRecents(Object ams) {
+        try {
+            Object atms = XposedHelpers.getObjectField(ams, "mActivityTaskManager");
+            if (atms == null) return false;
+            Object recentTasks = XposedHelpers.getObjectField(atms, "mRecentTasks");
+            if (recentTasks == null) return false;
+            sTasksField = recentTasks.getClass().getDeclaredField("mTasks");
+            sTasksField.setAccessible(true);
+            sRecentTasks = recentTasks;
+            return true;
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": resolveRecents failed: " + t);
+            return false;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ── OLD event-driven impl (Option A predecessor) — kept for rollback ──
+    // hookAppResumed / hookTaskRemovedFromRecents / unprotectTaskArg below are
+    // NO LONGER CALLED (see handleLoadPackage). Their call sites and the
+    // ProtectedApps check in checkExcessivePowerUsageLPr are commented out.
+    // ProtectedApps.java / KeepAliveConfig.java are untouched dead code.
+    // ═══════════════════════════════════════════════════════════════════════
 
     /** Extract package from the Task/TaskRecord arg (first param of both methods) and unprotect it. */
     private void unprotectTaskArg(Object[] args) {

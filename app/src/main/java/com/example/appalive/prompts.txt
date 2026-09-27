@@ -4,3 +4,7 @@ check MainHook.java, line 129 to 157, it use a file's content as a list to contr
 question 1, would it be duplicated in the list? question 2, would it be lock when one is add an item into the list and another one is remove from the list, question 3, what would happend if user open a app and kill it in recent app within 2s?
 
 about question 3, do you have a safe check before remove it from the list? if the item is not in the list, and you remove it would be ok?
+
+wait a sec, is that recent apps itself have a package list? when open a app it add it, user swip the app up then it delete the app?
+
+1. the current android device is android 14, not android 11 anymore, 2. forget that read file or config from KeepAliveConfig anymore, do not use it any more, wechat can die if wechat is not in recent apps card, do not change that KeepAliveConfig and ProtectedApps code, just comments its usage in MainHook.java, I perfer save the old code in case I may need it in furture, 3. use Option A, care for deadlock
