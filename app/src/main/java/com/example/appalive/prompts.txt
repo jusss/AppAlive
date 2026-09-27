@@ -1,0 +1,6 @@
+check MainHook.java, line 129 to 157, it use a file's content as a list to control which pacakge can setResult(false) in the xposed hook, I wonder is there a hook can get the package name when app start/resumed, and another hook can get app is killed by recent apps, you see, if I can get them, then I create a list to replace that package name read from a file, app start/resumed, put package name into a list, app killed by recent app(not backgroud service kill, just killed by recent apps) then remove the package name from the list, it's dynamic and it's better than that file config, you open a app it will setResult(false) to skip system kill, you swap the app up in recent apps, the app lost its protection, system can kill it
+
+
+question 1, would it be duplicated in the list? question 2, would it be lock when one is add an item into the list and another one is remove from the list, question 3, what would happend if user open a app and kill it in recent app within 2s?
+
+about question 3, do you have a safe check before remove it from the list? if the item is not in the list, and you remove it would be ok?

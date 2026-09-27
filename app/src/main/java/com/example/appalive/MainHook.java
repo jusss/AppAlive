@@ -145,11 +145,15 @@ public class MainHook implements IXposedHookLoadPackage {
                                             if (app.getClass().getName().equals("com.android.server.am.ProcessRecord")){
                                                 Object info = XposedHelpers.getObjectField(app, "info");
                                                 String packageName = (String) XposedHelpers.getObjectField(info, "packageName");
-                                                if (KeepAliveConfig.contains(packageName)) {
+                                                // dynamic list: added on app resume, removed when task swiped away in recents
+                                                // (seeded at boot from KeepAliveConfig). see ProtectedApps.
+                                                if (ProtectedApps.contains(packageName)) {
                                                     XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr skip: " + packageName);
                                                     param.setResult(false);
                                                 }
                                             }
+                                            // debug
+                                            ProtectedApps.dump();
                                         } catch (Throwable t) {
                                             XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());
                                         }
@@ -197,12 +201,138 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         };
 
+        // dynamic keep-alive: seed once from file/defaults, then maintained by
+        // app-resume / recents-swipe hooks below
+        ProtectedApps.seedIfNeeded();
+
+        hookAppResumed(lpparam.classLoader);
+        hookTaskRemovedFromRecents(lpparam.classLoader);
+
         // 注意：不要在 handleLoadPackage 里调用 callNMS_Reflection 做启动测试。
         // 此时代码运行在系统启动早期，"notification" 服务尚未注册，
         // 拿到的 NotificationManager.mService 为 null，createNotificationChannel 会 NPE。
 
         hookNotificationManager(lpparam.classLoader);
         hookBootComplete(lpparam.classLoader);
+    }
+
+    // ── Hook C: app came to foreground (started / resumed) → protect it ──
+    // ActivityRecord.completeResumeLocked() is called (under the WM lock) exactly when an
+    // activity actually becomes resumed, i.e. the app was opened or brought back to front.
+    // Android 12+: com.android.server.wm.ActivityRecord
+    // Android 11 : com.android.server.am.ActivityRecord  (same method name)
+    // Package comes from record.intent.getComponent(). Skip the launcher (ACTIVITY_TYPE_HOME)
+    // so the home app never enters the set.
+    // Only tiny in-memory set ops run in the hook -> safe under the WM lock.
+    private void hookAppResumed(ClassLoader cl) {
+        String[] arClasses = {
+                "com.android.server.wm.ActivityRecord",  // Android 12+
+                "com.android.server.am.ActivityRecord",  // Android 11 (lineage 18.1)
+        };
+        boolean hooked = false;
+        for (String name : arClasses) {
+            Class<?> ar = XposedHelpers.findClassIfExists(name, cl);
+            if (ar == null) continue;
+            try {
+                XposedBridge.hookAllMethods(ar, "completeResumeLocked", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            Object record = param.thisObject;
+                            Intent intent = (Intent) XposedHelpers.getObjectField(record, "intent");
+                            if (intent == null || intent.getComponent() == null) return;
+                            String pkg = intent.getComponent().getPackageName();
+                            if (pkg == null || pkg.isEmpty()) return;
+                            // don't protect the launcher / home task
+                            if (isHomeTask(record)) return;
+                            ProtectedApps.add(pkg);
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + ": hookAppResumed FAILED: " + t.getMessage());
+                        }
+                    }
+                });
+                hooked = true;
+                XposedBridge.log(TAG + ": Hooked " + name + ".completeResumeLocked ✓");
+                break; // only one of the two exists in a given ROM
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + ": hook " + name + ".completeResumeLocked FAILED: " + t.getMessage());
+            }
+        }
+        if (!hooked) XposedBridge.log(TAG + ": hookAppResumed: no ActivityRecord class found");
+    }
+
+    // ── Hook D: task removed from Recents (user swiped it away / Clear all) → unprotect ──
+    // ActivityTaskSupervisor.removeTask()/cleanUpRemovedTaskLocked() are ONLY reached from
+    // user-driven recents removal (swipe one card, Clear all) — LMK and background service
+    // kills never go through here, so background kills don't remove protection.
+    // Path (android-13 source, verified): IActivityTaskManager.removeTask
+    //   → ActivityTaskSupervisor.removeTask(Task, killProcess, removeFromRecents, reason)
+    //   → cleanUpRemovedTaskLocked(Task, ...) → killProcessesForRemovedTask
+    // Android 12+: com.android.server.wm.ActivityTaskSupervisor
+    // Android 11 : com.android.server.am.ActivityStackSupervisor (same method names)
+    // Task/TaskRecord package: task.getBaseIntent().getComponent().getPackageName()
+    // Both methods are hooked on purpose: some paths go through removeTask, some directly
+    // into cleanUpRemovedTaskLocked; Set.remove is idempotent so double-fire is harmless.
+    private void hookTaskRemovedFromRecents(ClassLoader cl) {
+        String[] supClasses = {
+                "com.android.server.wm.ActivityTaskSupervisor",   // Android 12+
+                "com.android.server.am.ActivityStackSupervisor",  // Android 11 (lineage 18.1)
+        };
+        boolean hooked = false;
+        for (String name : supClasses) {
+            Class<?> sup = XposedHelpers.findClassIfExists(name, cl);
+            if (sup == null) continue;
+            try {
+                // hookAllMethods: signatures differ slightly across versions
+                // (removeTask(Task,boolean,boolean,String) / cleanUpRemovedTaskLocked(Task,boolean,boolean)),
+                // first arg is always the Task/TaskRecord in every version.
+                XposedBridge.hookAllMethods(sup, "removeTask", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        unprotectTaskArg(param.args);
+                    }
+                });
+                XposedBridge.hookAllMethods(sup, "cleanUpRemovedTaskLocked", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        unprotectTaskArg(param.args);
+                    }
+                });
+                hooked = true;
+                XposedBridge.log(TAG + ": Hooked " + name + ".removeTask/cleanUpRemovedTaskLocked ✓");
+                break; // only one of the two exists in a given ROM
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + ": hook " + name + " task-removal FAILED: " + t.getMessage());
+            }
+        }
+        if (!hooked) XposedBridge.log(TAG + ": hookTaskRemovedFromRecents: no supervisor class found");
+    }
+
+    /** Extract package from the Task/TaskRecord arg (first param of both methods) and unprotect it. */
+    private void unprotectTaskArg(Object[] args) {
+        try {
+            if (args == null || args.length == 0 || args[0] == null) return;
+            Object task = args[0];
+            Intent baseIntent = (Intent) XposedHelpers.callMethod(task, "getBaseIntent");
+            if (baseIntent == null || baseIntent.getComponent() == null) return;
+            String pkg = baseIntent.getComponent().getPackageName();
+            if (pkg == null || pkg.isEmpty()) return;
+            ProtectedApps.remove(pkg);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": unprotectTaskArg FAILED: " + t.getMessage());
+        }
+    }
+
+    /** Best-effort: is this ActivityRecord the home/launcher task? */
+    private boolean isHomeTask(Object activityRecord) {
+        try {
+            // ConfigurationContainer.getActivityType(): ACTIVITY_TYPE_HOME == 2,
+            // available on both 11 (via WindowContainer) and 12+ (via Fragment)
+            Object type = XposedHelpers.callMethod(activityRecord, "getActivityType");
+            return type instanceof Integer && (Integer) type == 2;
+        } catch (Throwable t) {
+            return false; // can't tell → don't exclude
+        }
     }
 
     // ── Hook B: every message that becomes a notification ─────────────
