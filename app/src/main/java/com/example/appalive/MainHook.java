@@ -358,6 +358,17 @@ public class MainHook implements IXposedHookLoadPackage {
     private static Field sTasksField = null;            // RecentTasks.mTasks
     private static volatile boolean sRecentsFailed = false; // log-once guard
 
+    // per-pass snapshot: one check pass bursts ~50+ hook calls in <0.1s, all
+    // asking the same question about the same list. Scan ONCE per burst into
+    // a LinkedHashSet (keeps recents order for the dump), serve O(1) contains.
+    // TTL 2s: a burst lasts <0.1s and the next pass is 5min away → always cold
+    // at burst start, so every app in one pass is judged against the SAME
+    // recents moment and staleness can never span two decisions.
+    private static volatile java.util.Set<String> sRecentsSnapshot =
+            java.util.Collections.emptySet();
+    private static volatile long sRecentsSnapshotAt = 0L;
+    private static final long RECENTS_SNAPSHOT_TTL_MS = 2000L;
+
     /**
      * Option A check: does {@code packageName} currently have a task in recents?
      * Called from the checkExcessivePowerUsageLPr hook ( AMS check cadence:
@@ -381,19 +392,14 @@ public class MainHook implements IXposedHookLoadPackage {
         }
 
         try {
-            @SuppressWarnings("unchecked")
-            java.util.ArrayList<Object> tasks =
-                    (java.util.ArrayList<Object>) sTasksField.get(sRecentTasks);
-            if (tasks == null) return false;
-            for (int i = 0; i < tasks.size(); i++) {
-                Object task = tasks.get(i);
-                if (task == null) continue;
-                Intent baseIntent = (Intent) XposedHelpers.callMethod(task, "getBaseIntent");
-                if (baseIntent == null) continue;
-                ComponentName cn = baseIntent.getComponent();
-                if (cn == null) continue;
-                if (packageName.equals(cn.getPackageName())) return true;
+            long now = android.os.SystemClock.elapsedRealtime();
+            java.util.Set<String> snapshot = sRecentsSnapshot;
+            if (now - sRecentsSnapshotAt >= RECENTS_SNAPSHOT_TTL_MS) {
+                snapshot = buildRecentsSnapshot();
+                sRecentsSnapshot = snapshot;
+                sRecentsSnapshotAt = now;
             }
+            return snapshot.contains(packageName);
         } catch (Throwable t) {
             if (!sRecentsFailed) {
                 sRecentsFailed = true;
@@ -401,7 +407,39 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             return false;
         }
-        return false;
+    }
+
+    /**
+     * Scan mTasks once into an immutable snapshot set (recents order kept for
+     * the dump). Called at most once per TTL window; each hook call in a burst
+     * then does an O(1) contains().
+     */
+    private static java.util.Set<String> buildRecentsSnapshot() {
+        java.util.Set<String> pkgs = new java.util.LinkedHashSet<>();
+        try {
+            @SuppressWarnings("unchecked")
+            java.util.ArrayList<Object> tasks =
+                    (java.util.ArrayList<Object>) sTasksField.get(sRecentTasks);
+            if (tasks == null) return java.util.Collections.emptySet();
+            for (int i = 0; i < tasks.size(); i++) {
+                Object task = tasks.get(i);
+                if (task == null) continue;
+                try {
+                    Intent baseIntent = (Intent) XposedHelpers.callMethod(task, "getBaseIntent");
+                    if (baseIntent == null || baseIntent.getComponent() == null) continue;
+                    pkgs.add(baseIntent.getComponent().getPackageName());
+                } catch (Throwable perTask) {
+                    // one weird task must not break the whole snapshot
+                }
+            }
+        } catch (Throwable t) {
+            if (!sRecentsFailed) {
+                sRecentsFailed = true;
+                XposedBridge.log(TAG + ": buildRecentsSnapshot FAILED: " + t);
+            }
+            return java.util.Collections.emptySet(); // fail-open, safe direction
+        }
+        return pkgs;
     }
 
     /**
@@ -413,28 +451,11 @@ public class MainHook implements IXposedHookLoadPackage {
      * returned true). Reuses the cached fields; no resolution, no locks.
      */
     private static String dumpRecentsPackages() {
-        StringBuilder sb = new StringBuilder("[");
         try {
-            @SuppressWarnings("unchecked")
-            java.util.ArrayList<Object> tasks =
-                    (java.util.ArrayList<Object>) sTasksField.get(sRecentTasks);
-            if (tasks == null) return sb.append("null]").toString();
-            for (int i = 0; i < tasks.size(); i++) {
-                Object task = tasks.get(i);
-                if (task == null) continue;
-                try {
-                    Intent baseIntent = (Intent) XposedHelpers.callMethod(task, "getBaseIntent");
-                    if (baseIntent == null || baseIntent.getComponent() == null) continue;
-                    if (sb.length() > 1) sb.append(", ");
-                    sb.append(baseIntent.getComponent().getPackageName());
-                } catch (Throwable perTask) {
-                    // one weird task must not break the whole dump
-                }
-            }
+            return sRecentsSnapshot.toString(); // same snapshot the check used
         } catch (Throwable t) {
-            return sb.append("DUMP_FAILED: ").append(t.getMessage()).append(']').toString();
+            return "[DUMP_FAILED: " + t.getMessage() + ']';
         }
-        return sb.append(']').toString();
     }
 
     /** One-time reflective resolve: AMS.mActivityTaskManager.mRecentTasks + its mTasks field. */
