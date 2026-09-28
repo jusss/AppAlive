@@ -321,7 +321,6 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 }
             );
-            */
             XposedHelpers.findAndHookMethod(
                     "android.hardware.display.AmbientDisplayConfiguration", // Android 14
                                 cl,
@@ -336,6 +335,22 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 }
             );
+
+            */
+
+            XposedHelpers.findAndHookMethod(
+    "com.android.systemui.doze.DozeHost",
+    cl,
+    "isAlwaysOnSuppressed",
+    new XC_MethodReplacement() {
+        @Override
+        protected Object replaceHookedMethod(MethodHookParam param) {
+            return false; // 强制认为 AOD 没有被压制
+        }
+    }
+);
+
+
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": hookPulseOnNotification FAILED: " + t.getMessage());
         }
