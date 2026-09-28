@@ -5,6 +5,7 @@ import android.app.NotificationManager;
 import android.app.NotificationChannel;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -21,6 +22,7 @@ import android.os.IBinder;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.os.UserHandle;
+import android.provider.Settings;
 import android.telephony.TelephonyManager;
 
 import android.media.AudioAttributes;
@@ -283,9 +285,65 @@ public class MainHook implements IXposedHookLoadPackage {
         // 此时代码运行在系统启动早期，"notification" 服务尚未注册，
         // 拿到的 NotificationManager.mService 为 null，createNotificationChannel 会 NPE。
 
-        hookNotificationManager(lpparam.classLoader);
-        hookBootComplete(lpparam.classLoader);
+//        hookNotificationManager(lpparam.classLoader);
+        // hook NMS, and call PMS will get deadlock, this is the wrong way
+        // so I wonder what's the notification chain, new notification -> wake up -> make sound, I could call PMS in the end of the chain
+        // then I search how to trigger notification tone, then I find DozeTriggers.onNotification,
+        // there're two way about light up screen, one is pulse, light for notification, another is wake up
+        // the reason that notification will not wake screen, may be ROM disabled pulseOnNotificationEnabled
+        // -> Settings.Secure.getIntForUser,
+
+        hookPulseOnNotification(lpparam.classLoader);
+//        hookBootComplete(lpparam.classLoader);
     }
+
+    private void hookPulseOnNotification(ClassLoader cl) {
+        try {
+            /*
+            Settings.Secure 和 AmbientDisplayConfiguration 都在 framework（android）和 SystemUI（com.android.systemui）中都有使用
+            建议同时勾选 System Framework 和 SystemUI，确保两个进程中的读取都被拦截
+            XposedHelpers.findAndHookMethod(
+                "android.provider.Settings$Secure",
+                cl,
+                "getIntForUser",
+                ContentResolver.class,
+                String.class,
+                int.class,
+                int.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        String key = (String) param.args[1];
+                        if ("doze_enabled".equals(key)) {
+                            param.setResult(1); // 强制返回“已启用”
+                            XposedBridge.log("AppAlive: forced DOZE_ENABLED=1");
+                        }
+                    }
+                }
+            );
+            */
+            XposedHelpers.findAndHookMethod(
+                    "android.hardware.display.AmbientDisplayConfiguration", // Android 14
+                                cl,
+                "pulseOnNotificationEnabled",
+                int.class,  // user
+                new XC_MethodReplacement() {
+                    @Override
+                    protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
+                        // 原逻辑：boolSetting(DOZE_ENABLED, user) && pulseOnNotificationAvailable()
+                        // 强制返回 true，跳过所有检查
+                        return true;
+                    }
+                }
+            );
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": hookPulseOnNotification FAILED: " + t.getMessage());
+        }
+    }
+
+
+
+
 
     // ── Hook C: app came to foreground (started / resumed) → protect it ──
     // ActivityRecord.completeResumeLocked() is called (under the WM lock) exactly when an
@@ -810,12 +868,9 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
                                 // handleLoadPackage("android") 运行于 SystemServer 极早期（AMS 未起、
                                 // ActivityManager 未 ready），不能在当前线程直接 registerReceiver；
                                 // post 到 worker 线程延后执行。失败时 wakeScreen 会惰性重试。
-                                getWorker().post(new Runnable() {
-                                    @Override public void run() { initWorker(); }
-                                });
-
-
-
+//                                getWorker().post(new Runnable() {
+//                                    @Override public void run() { initWorker(); }
+//                                });
                         } catch (Throwable t) {
                             XposedBridge.log(TAG + ": Hooked finishBooting failed: " + t);
                         }
