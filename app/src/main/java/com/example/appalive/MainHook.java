@@ -3,9 +3,11 @@ package com.example.appalive;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.NotificationChannel;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.media.AudioManager;
@@ -75,6 +77,64 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final Object sWorkerHandlerLock = new Object();
 
     private static volatile PowerManager spm = null;
+
+    // ── Fix 4: cached screen state (fix #1) ─────────────────────────────────
+    // WakeScreen 最大的 reboot 风险不在异常，而在时序：worker 线程同步调用
+    // pm.isInteractive() 会发起一次同步 binder txn 进入 PowerManagerService，
+    // 需要拿 PMS 内部锁。只要系统线程同时持有 NMS mNotificationLock、
+    // 且有别的线程反向持有 PMS 锁等 NMS 锁，就构成锁循环 → system_server 卡死
+    // → Watchdog 杀进程 → 设备 "reboot"（framework restart）。
+    // 解法：完全不在通知路径上碰 PMS —— 改用系统 sticky 广播
+    // (ACTION_SCREEN_ON / ACTION_SCREEN_OFF) 维护屏幕状态缓存。
+    // 这两个广播是 protected system broadcast 且 sticky：
+    //   1. 注册后系统立即回放 sticky 的当前值（无需任何 IPC 查询初始状态）
+    //   2. Android 14 的 receiver-exported 强制要求不适用于 protected broadcasts
+    private static final Object sScreenStateLock = new Object();
+    private static volatile Boolean sScreenInteractive = null; // null = 未知
+    private static volatile boolean sScreenStateReceiverRegistered = false;
+
+    // Fix 4 (fix #2)：worker 任务延后执行，与 NMS 临界区拉开时间差。
+    // afterHookedMethod 时 NMS 锁虽已释放，但系统侧还有 buzzBeepBlinkLight、
+    // ranking 回调等后续工作可能在别的系统线程里短暂持有 NMS 锁；延迟 1s
+    // 让 worker 的 PMS 事务（若有）几乎不可能与任何 NMS 持锁窗口重叠。
+    private static final long WAKE_POST_DELAY_MS = 1000;
+
+    // fix #3：唤醒锁只创建一次，进程生命周期内复用。
+    // 注意：使用方必须总是 acquire(timeout)，超时回收兜底，无需手动 release。
+    private static volatile PowerManager.WakeLock sWakeLock = null;
+
+    private static void initWorker() {
+        getWorker(); // 惰性创建 AppAliveWorker HandlerThread
+        if (sScreenStateReceiverRegistered) return;
+        synchronized (sScreenStateLock) {
+            if (sScreenStateReceiverRegistered || sSystemContext == null) return;
+            try {
+                BroadcastReceiver r = new BroadcastReceiver() {
+                    @Override
+                    public void onReceive(Context context, Intent intent) {
+                        String action = intent.getAction();
+                        if (Intent.ACTION_SCREEN_ON.equals(action)) {
+                            sScreenInteractive = Boolean.TRUE;
+                        } else if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                            sScreenInteractive = Boolean.FALSE;
+                        }
+                    }
+                };
+                // 两参形式即可：SCREEN_ON/OFF 是 protected system broadcast，
+                // 不受 Android 14 receiver-exported 限制；sticky 回放会立刻
+                // 填充 sScreenInteractive 初始值。
+                sSystemContext.registerReceiver(r,
+                        new IntentFilter(Intent.ACTION_SCREEN_ON));
+                sSystemContext.registerReceiver(r,
+                        new IntentFilter(Intent.ACTION_SCREEN_OFF));
+                sScreenStateReceiverRegistered = true;
+                XposedBridge.log(TAG + ": screen state receiver registered, initial=" + sScreenInteractive);
+            } catch (Throwable t) {
+                // 注册失败不致命：wakeScreen 会择机重试
+                XposedBridge.log(TAG + ": register screen state receiver failed: " + t);
+            }
+        }
+    }
 
 
     private static Handler getWorker() {
@@ -595,6 +655,7 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
                     */
                     String pkg = (String) param.args[0];
                     String tag = (String) param.args[4];
+                    final Notification n = (Notification) param.args[6]; // 立即提取
 
                     if (pkg.equals("com.android.vending")) return;
                     if (pkg.equals("android")) return;
@@ -607,17 +668,21 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
                     final String fPkg = pkg;
                     final String fTag = tag;
 
-                    getWorker().post(new Runnable() {
+                    getWorker().postDelayed(new Runnable() {
                         @Override public void run() {
-                            Notification n = (Notification) param.args[6];
                             if (!isMessageNotification(n)) return;
 
 //                    XposedBridge.log(TAG + ": NMS " + pkg);
 
 //                            callNMS_Reflection(fPkg, fTag, cl);
+
+                            // AMS call PMS or NMS call PMS may cause deadlock
+                            // afterHookedMethod enqueueNotificationInternel, the after still may have NMS and PMS waiting to light up screen in other thread
+                            // but XposedHelpers.callMethod(pms_obj, "isInteractive"); here will get PMS's mLock, it may cause deadlock, add a dealy time, and use screen_on/off event instead of inInteractive
+
                             wakeScreen("pkg: " + fPkg + ", tag: " + fTag, cl);
                         }
-                    });
+                    }, WAKE_POST_DELAY_MS);
                     } catch (Throwable t) {
                         XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t);
                     }
@@ -630,21 +695,36 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
     }
 
     private void wakeScreen(final String source, final ClassLoader cl) {
-        // Fix 3: thread-guard — if we are not on the AppAliveWorker thread, re-post
-        // ourselves there and return immediately. Belt-and-braces on top of the
-        // capture-and-post design: no IPC/wakeUp can ever run on a system_server
-        // hook thread (android.display / binder) again.
+        // Fix 3 (restored): thread-guard — if we are not on the AppAliveWorker
+        // thread, re-post ourselves there and return immediately. No IPC /
+        // wakeUp may ever run on a system_server hook thread
+        // (android.display / binder).
         if (!"AppAliveWorker".equals(Thread.currentThread().getName())) {
-//            final ClassLoader fCl = cl;
-//            getWorker().post(new Runnable() {
-//                @Override public void run() { wakeScreen(source, fCl); }
-//            });
+            final String fSource = source;
+            getWorker().postDelayed(new Runnable() {
+                @Override public void run() { wakeScreen(fSource, cl); }
+            }, WAKE_POST_DELAY_MS);
             return;
         }
         if (sSystemContext == null) return;
         long now = SystemClock.elapsedRealtime();
         if (now - lastWake < 3000) return;                 // IMPORTANT: both hooks fire for one message
         lastWake = now;
+
+        // Fix 4 (fix #1)：用广播缓存判断屏幕状态，通知路径上零 PMS binder 事务。
+        // isInteractive() 属于同步 binder 调用（进入 PowerManagerService 需拿
+        // PMS 内部锁），是锁循环 → Watchdog → reboot 风险的根源，已彻底移除。
+        if (!sScreenStateReceiverRegistered) {
+            initWorker(); // 惰性重试注册（含 sticky 回放，注册即得到初值）
+        }
+        Boolean interactive = sScreenInteractive;
+        if (interactive == null) {
+            // 状态未知（接收器尚未注册成功/尚未回放）：跳过本次唤醒。
+            // 宁可不亮屏也不在通知路径上发起任何 PMS 调用。
+            XposedBridge.log(TAG + ": screen state unknown, skip wake (" + source + ")");
+            return;
+        }
+        if (interactive) return; // 屏幕已亮，无需唤醒
 
         try {
             PowerManager pms_obj = spm;
@@ -657,17 +737,19 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
                 spm = pms_obj;
             }
 
-            boolean isInteractive = (boolean) XposedHelpers.callMethod(pms_obj, "isInteractive");
-            if (isInteractive) return; // 检查屏幕是否已亮
-
-            PowerManager.WakeLock wakeLock = pms_obj.newWakeLock(
-    PowerManager.FULL_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP,
-            "AppAlive:WakeScreen"
-            );
+            // Fix 4 (fix #3)：WakeLock 只创建一次并缓存。newWakeLock() 本身
+            // 不发起 binder 事务，但每次 new 都会在 framework 侧新建对象并
+            // 增加锁对象数量；acquire(timeout) 的超时机制保证即使代码异常
+            // 路径漏掉 release()，系统也会在 5s 后自动回收该锁。
+            if (sWakeLock == null) {
+                sWakeLock = pms_obj.newWakeLock(
+                        PowerManager.FULL_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                        "AppAlive:WakeScreen");
+            }
 
             XposedBridge.log(TAG + ": wake up screen by " + source);
             // Acquire with a timeout to be safe
-            wakeLock.acquire(5000); // 5 seconds
+            sWakeLock.acquire(5000); // 5 seconds
         } catch (Throwable t) {
             XposedBridge.log("wakeScreen failed: " + t);
         }
@@ -722,6 +804,17 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
                                         callNMS_Reflection("Boot test", "NMS reflection OK after boot", cl);
                                     }
                                 }, "AppAliveBootTest").start();
+
+
+                                // Fix 4：启动时即初始化 worker 线程并注册屏幕状态广播接收器。
+                                // handleLoadPackage("android") 运行于 SystemServer 极早期（AMS 未起、
+                                // ActivityManager 未 ready），不能在当前线程直接 registerReceiver；
+                                // post 到 worker 线程延后执行。失败时 wakeScreen 会惰性重试。
+                                getWorker().post(new Runnable() {
+                                    @Override public void run() { initWorker(); }
+                                });
+
+
 
                         } catch (Throwable t) {
                             XposedBridge.log(TAG + ": Hooked finishBooting failed: " + t);
