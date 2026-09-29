@@ -52,103 +52,10 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final String TAG = "AppAlive";
     // AOSP source code https://cs.android.com/android/platform/superproject/+/android-latest-release:frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java;l=602?q=ActivityManagerService&sq=
     // lineage 18.1 source code https://github.com/LineageOS/android_frameworks_base/blob/lineage-18.1/services/core/java/com/android/server/am/ActivityManagerService.java
-    // NMS -> screen off -> wakeup screen, play sound, no toast
-    //     -> screen on -> nothing
-
-    // FCM -> screen off -> toast/notification, wakeup screen, play sound
-    //     -> screen on -> toast/notification, nothing
     // keytool -genkeypair -v -keystore AppAlive/app/release.jks -alias appalive -keyalg RSA -keysize 2048 -validity 10000 -storepass 123 -keypass 123
 
-    private static final String ACTION_FCM = "com.google.firebase.MESSAGING_EVENT";
-    private static final String ACTION_GCM = "com.google.android.c2dm.intent.RECEIVE"; // legacy GCM
-    private static long lastWake = 0;
     private static Context sSystemContext = null;
     private static final Object lock = new Object();
-    private static int notificationId = 0;
-    private static Class<?> nms = null;
-    // 缓存：NotificationManagerService 与 system_server 同进程同生命周期，
-    // binder 是进程级单例，system_server 不重启它就永远有效；失败时置 null 重取。
-    private static volatile NotificationManager sNms = null;
-    private static final long DEBOUNCE_WINDOW_MS = 3000;
-    // key = pkg + "|" + opPkg  → 该组合最近一次放行时间
-    // 用 ConcurrentHashMap：binder 多线程并发访问安全；条目数 ≈ 应用数量，不会无限增长
-    private static final java.util.Map<String, Long> sLastWakeByApp =
-            new java.util.concurrent.ConcurrentHashMap<>();
-
-    private static Handler sWorkerHandler = null;
-    private static final Object sWorkerHandlerLock = new Object();
-
-    private static volatile PowerManager spm = null;
-
-    // ── Fix 4: cached screen state (fix #1) ─────────────────────────────────
-    // WakeScreen 最大的 reboot 风险不在异常，而在时序：worker 线程同步调用
-    // pm.isInteractive() 会发起一次同步 binder txn 进入 PowerManagerService，
-    // 需要拿 PMS 内部锁。只要系统线程同时持有 NMS mNotificationLock、
-    // 且有别的线程反向持有 PMS 锁等 NMS 锁，就构成锁循环 → system_server 卡死
-    // → Watchdog 杀进程 → 设备 "reboot"（framework restart）。
-    // 解法：完全不在通知路径上碰 PMS —— 改用系统 sticky 广播
-    // (ACTION_SCREEN_ON / ACTION_SCREEN_OFF) 维护屏幕状态缓存。
-    // 这两个广播是 protected system broadcast 且 sticky：
-    //   1. 注册后系统立即回放 sticky 的当前值（无需任何 IPC 查询初始状态）
-    //   2. Android 14 的 receiver-exported 强制要求不适用于 protected broadcasts
-    private static final Object sScreenStateLock = new Object();
-    private static volatile Boolean sScreenInteractive = null; // null = 未知
-    private static volatile boolean sScreenStateReceiverRegistered = false;
-
-    // Fix 4 (fix #2)：worker 任务延后执行，与 NMS 临界区拉开时间差。
-    // afterHookedMethod 时 NMS 锁虽已释放，但系统侧还有 buzzBeepBlinkLight、
-    // ranking 回调等后续工作可能在别的系统线程里短暂持有 NMS 锁；延迟 1s
-    // 让 worker 的 PMS 事务（若有）几乎不可能与任何 NMS 持锁窗口重叠。
-    private static final long WAKE_POST_DELAY_MS = 1000;
-
-    // fix #3：唤醒锁只创建一次，进程生命周期内复用。
-    // 注意：使用方必须总是 acquire(timeout)，超时回收兜底，无需手动 release。
-    private static volatile PowerManager.WakeLock sWakeLock = null;
-
-    private static void initWorker() {
-        getWorker(); // 惰性创建 AppAliveWorker HandlerThread
-        if (sScreenStateReceiverRegistered) return;
-        synchronized (sScreenStateLock) {
-            if (sScreenStateReceiverRegistered || sSystemContext == null) return;
-            try {
-                BroadcastReceiver r = new BroadcastReceiver() {
-                    @Override
-                    public void onReceive(Context context, Intent intent) {
-                        String action = intent.getAction();
-                        if (Intent.ACTION_SCREEN_ON.equals(action)) {
-                            sScreenInteractive = Boolean.TRUE;
-                        } else if (Intent.ACTION_SCREEN_OFF.equals(action)) {
-                            sScreenInteractive = Boolean.FALSE;
-                        }
-                    }
-                };
-                // 两参形式即可：SCREEN_ON/OFF 是 protected system broadcast，
-                // 不受 Android 14 receiver-exported 限制；sticky 回放会立刻
-                // 填充 sScreenInteractive 初始值。
-                sSystemContext.registerReceiver(r,
-                        new IntentFilter(Intent.ACTION_SCREEN_ON));
-                sSystemContext.registerReceiver(r,
-                        new IntentFilter(Intent.ACTION_SCREEN_OFF));
-                sScreenStateReceiverRegistered = true;
-                XposedBridge.log(TAG + ": screen state receiver registered, initial=" + sScreenInteractive);
-            } catch (Throwable t) {
-                // 注册失败不致命：wakeScreen 会择机重试
-                XposedBridge.log(TAG + ": register screen state receiver failed: " + t);
-            }
-        }
-    }
-
-
-    private static Handler getWorker() {
-        synchronized (sWorkerHandlerLock) {
-            if (sWorkerHandler == null) {
-                HandlerThread ht = new HandlerThread("AppAliveWorker");
-                ht.start();
-                sWorkerHandler = new Handler(ht.getLooper());
-            }
-            return sWorkerHandler;
-        }
-    }
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -166,10 +73,6 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             }
         }
-
-        try{
-            nms = XposedHelpers.findClass("com.android.server.notification.NotificationManagerService", lpparam.classLoader);
-        } catch (Throwable t) { XposedBridge.log(TAG + ": get NMS FAILED: " + t.getMessage()); }
 
         XposedBridge.log(TAG + ": Loaded into system_server");
 
@@ -211,20 +114,12 @@ public class MainHook implements IXposedHookLoadPackage {
                                                 // protected ⇔ package has a task in system RecentTasks.mTasks.
                                                 // open app → card exists → skip kill;
                                                 // swipe / Clear-all / recents-trim → card gone → system may kill.
-                                                // (spec: wechat can die if it has no recents card)
                                                 if (isProtectedByRecents(param.thisObject, packageName)) {
                                                     XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr skip: " + packageName);
                                                     XposedBridge.log(TAG + ": recents packages: " + dumpRecentsPackages());
                                                     param.setResult(false);
                                                 }
-                                                // ── old impl kept for rollback: file/DEFAULTS-seeded event set ──
-                                                // if (ProtectedApps.contains(packageName)) {
-                                                //     XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr skip: " + packageName);
-                                                //     param.setResult(false);
-                                                // }
                                             }
-                                            // debug: dump() belonged to the old ProtectedApps impl
-                                            // ProtectedApps.dump();
                                         } catch (Throwable t) {
                                             XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());
                                         }
@@ -234,28 +129,6 @@ public class MainHook implements IXposedHookLoadPackage {
                         XposedBridge.log(TAG + ": Hooked checkExcessivePowerUsageLPr ✓");
                     } catch (Throwable t) {
                         XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());
-                    }
-                };
-
-                if (method.getName().equals("sendKillExcessiveCpuProfilingTrigger")){
-                    // ─── Hook 4: sendKillExcessiveCpuProfilingTrigger → no-op ───
-                    // this may in com.android.server.am.AppProfiler in android 11-15, different OEM may have different parameters
-                    try {
-                        XposedBridge.hookMethod(method,
-                                new XC_MethodHook() {
-                                    @Override
-                                    protected void beforeHookedMethod(MethodHookParam param) {
-                                        try{
-                                            param.setResult(null);
-                                        } catch (Throwable t) {
-                                            XposedBridge.log(TAG + ": sendKillExcessiveCpuProfilingTrigger FAILED: " + t.getMessage());
-                                        }
-                                    }
-                                }
-                        );
-                        XposedBridge.log(TAG + ": Hooked sendKillExcessiveCpuProfilingTrigger ✓");
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + ": sendKillExcessiveCpuProfilingTrigger FAILED: " + t.getMessage());
                     }
                 };
 
@@ -272,20 +145,6 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         };
 
-        // ── old event-driven keep-alive (ProtectedApps) — disabled, kept for rollback ──
-        // seeded once from KeepAliveConfig file/DEFAULTS, then maintained by the
-        // app-resume / recents-swipe hooks below. Replaced by Option A
-        // (isProtectedByRecents): the system's own RecentTasks list is the source of
-        // truth — no custom list, no file, no config.
-        // ProtectedApps.seedIfNeeded();
-        // hookAppResumed(lpparam.classLoader);
-        // hookTaskRemovedFromRecents(lpparam.classLoader);
-
-        // 注意：不要在 handleLoadPackage 里调用 callNMS_Reflection 做启动测试。
-        // 此时代码运行在系统启动早期，"notification" 服务尚未注册，
-        // 拿到的 NotificationManager.mService 为 null，createNotificationChannel 会 NPE。
-
-//        hookNotificationManager(lpparam.classLoader);
         // hook NMS, and call PMS will get deadlock, this is the wrong way
         // so I wonder what's the notification chain, new notification -> wake up -> make sound, I could call PMS in the end of the chain
         // then I search how to trigger notification tone, then I find DozeTriggers.onNotification,
@@ -293,11 +152,14 @@ public class MainHook implements IXposedHookLoadPackage {
         // the reason that notification will not wake screen, may be ROM disabled pulseOnNotificationEnabled
         // -> Settings.Secure.getIntForUser,
 
-        hookPulseOnNotification(lpparam.classLoader);
+
+        // soft restart to apply changes, adb shell; stop; start;   will restart system_server
+
+        hookPulseOnNotification(lpparam);
 //        hookBootComplete(lpparam.classLoader);
     }
 
-    private void hookPulseOnNotification(ClassLoader cl) {
+    private void hookPulseOnNotification(XC_LoadPackage.LoadPackageParam lpp) {
         try {
             /*
             Settings.Secure 和 AmbientDisplayConfiguration 都在 framework（android）和 SystemUI（com.android.systemui）中都有使用
@@ -336,153 +198,67 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             );
 
-            */
 
             XposedHelpers.findAndHookMethod(
-    "com.android.systemui.doze.DozeHost",
-    cl,
+        "com.android.systemui.doze.DozeHost",
+                cl,
     "isAlwaysOnSuppressed",
-    new XC_MethodReplacement() {
-        @Override
-        protected Object replaceHookedMethod(MethodHookParam param) {
-            return false; // 强制认为 AOD 没有被压制
-        }
-    }
-);
+                new XC_MethodReplacement() {
+                @Override
+                protected Object replaceHookedMethod(MethodHookParam param) {
+                    return false; // 强制认为 AOD 没有被压制
+                }
+                }
+            );
 
+            */
 
+            final String DOZE_COMPONENT =
+                    "com.android.systemui/com.android.systemui.doze.DozeService";
+
+            boolean isSystemServer = "android".equals(lpp.packageName);
+            boolean isSystemUI     = "com.android.systemui".equals(lpp.packageName);
+            if (!isSystemServer && !isSystemUI) return;
+
+            // ① THE fix: give it a doze component (also makes ambientDisplayAvailable() true)
+            XposedHelpers.findAndHookMethod(
+                    "android.hardware.display.AmbientDisplayConfiguration", lpp.classLoader,
+                    "ambientDisplayComponent",
+                    XC_MethodReplacement.returnConstant(DOZE_COMPONENT));
+
+            // ② Kill switch used by SystemUI's shouldHeadsUpWhenDozing AND by
+            //    DreamManagerService.getDozeComponent() via enabled()
+            XposedHelpers.findAndHookMethod(
+                    "android.hardware.display.AmbientDisplayConfiguration", lpp.classLoader,
+                    "pulseOnNotificationEnabled", int.class,
+                    XC_MethodReplacement.returnConstant(true));
+
+            // Deliberately NOT touching alwaysOnEnabled() → no full AOD, pulses only.
+
+            if (isSystemUI) {
+                // ③ Now-reachable DozeTriggers: neutralize sWakeDisplaySensorState + isAlwaysOnSuppressed
+                Class<?> dt = XposedHelpers.findClass(
+                        "com.android.systemui.doze.DozeTriggers", lpp.classLoader);
+                XposedHelpers.findAndHookMethod(dt, "onNotification", Runnable.class,
+                        new XC_MethodReplacement() {
+                            @Override
+                            protected Object replaceHookedMethod(MethodHookParam param) {
+                                XposedHelpers.setStaticBooleanField(dt, "sWakeDisplaySensorState", true);
+                                XposedHelpers.callMethod(param.thisObject, "requestPulse",
+                                        1 /* PULSE_REASON_NOTIFICATION */, false, param.args[0]);
+                                return null;
+                            }
+                        });
+                XposedHelpers.findAndHookMethod(
+                        "com.android.systemui.statusbar.phone.DozeServiceHost", lpp.classLoader,
+                        "isAlwaysOnSuppressed", XC_MethodReplacement.returnConstant(false));
+            }
+
+            XposedBridge.log(TAG + ": Hooked PulseOnNotification ✓");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": hookPulseOnNotification FAILED: " + t.getMessage());
-        }
-    }
-
-
-
-
-
-    // ── Hook C: app came to foreground (started / resumed) → protect it ──
-    // ActivityRecord.completeResumeLocked() is called (under the WM lock) exactly when an
-    // activity actually becomes resumed, i.e. the app was opened or brought back to front.
-    // Android 12+: com.android.server.wm.ActivityRecord
-    // Android 11 : com.android.server.am.ActivityRecord  (same method name)
-    // Package comes from record.intent.getComponent(). Skip the launcher (ACTIVITY_TYPE_HOME)
-    // so the home app never enters the set.
-    // Only tiny in-memory set ops run in the hook -> safe under the WM lock.
-    private void hookAppResumed(ClassLoader cl) {
-        String[] arClasses = {
-                "com.android.server.wm.ActivityRecord",  // Android 12+
-                "com.android.server.am.ActivityRecord",  // Android 11 (lineage 18.1)
-        };
-        boolean hooked = false;
-        for (String name : arClasses) {
-            Class<?> ar = XposedHelpers.findClassIfExists(name, cl);
-            if (ar == null) continue;
-            try {
-                XposedBridge.hookAllMethods(ar, "completeResumeLocked", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        try {
-                            Object record = param.thisObject;
-                            Intent intent = (Intent) XposedHelpers.getObjectField(record, "intent");
-                            if (intent == null || intent.getComponent() == null) return;
-                            String pkg = intent.getComponent().getPackageName();
-                            if (pkg == null || pkg.isEmpty()) return;
-                            // don't protect the launcher / home task
-                            if (isHomeTask(record)) return;
-                            ProtectedApps.add(pkg);
-                        } catch (Throwable t) {
-                            XposedBridge.log(TAG + ": hookAppResumed FAILED: " + t.getMessage());
-                        }
-                    }
-                });
-                hooked = true;
-                XposedBridge.log(TAG + ": Hooked " + name + ".completeResumeLocked ✓");
-                break; // only one of the two exists in a given ROM
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + ": hook " + name + ".completeResumeLocked FAILED: " + t.getMessage());
+                XposedBridge.log(TAG + ": hookPulseOnNotification FAILED: " + t.getMessage());
             }
-        }
-        if (!hooked) XposedBridge.log(TAG + ": hookAppResumed: no ActivityRecord class found");
     }
-
-    // ── Hook D: task removed from Recents (user swiped it away / Clear all) → unprotect ──
-    // ActivityTaskSupervisor.removeTask()/cleanUpRemovedTaskLocked() are ONLY reached from
-    // user-driven recents removal (swipe one card, Clear all) — LMK and background service
-    // kills never go through here, so background kills don't remove protection.
-    // Path (android-13 source, verified): IActivityTaskManager.removeTask
-    //   → ActivityTaskSupervisor.removeTask(Task, killProcess, removeFromRecents, reason)
-    //   → cleanUpRemovedTaskLocked(Task, ...) → killProcessesForRemovedTask
-    // Android 12+: com.android.server.wm.ActivityTaskSupervisor
-    // Android 11 : com.android.server.am.ActivityStackSupervisor (same method names)
-    // Task/TaskRecord package: task.getBaseIntent().getComponent().getPackageName()
-    // Both methods are hooked on purpose: some paths go through removeTask, some directly
-    // into cleanUpRemovedTaskLocked; Set.remove is idempotent so double-fire is harmless.
-    private void hookTaskRemovedFromRecents(ClassLoader cl) {
-        String[] supClasses = {
-                "com.android.server.wm.ActivityTaskSupervisor",   // Android 12+
-                "com.android.server.am.ActivityStackSupervisor",  // Android 11 (lineage 18.1)
-        };
-        boolean hooked = false;
-        for (String name : supClasses) {
-            Class<?> sup = XposedHelpers.findClassIfExists(name, cl);
-            if (sup == null) continue;
-            try {
-                // hookAllMethods: signatures differ slightly across versions
-                // (removeTask(Task,boolean,boolean,String) / cleanUpRemovedTaskLocked(Task,boolean,boolean)),
-                // first arg is always the Task/TaskRecord in every version.
-                XposedBridge.hookAllMethods(sup, "removeTask", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        unprotectTaskArg(param.args);
-                    }
-                });
-                XposedBridge.hookAllMethods(sup, "cleanUpRemovedTaskLocked", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        unprotectTaskArg(param.args);
-                    }
-                });
-                hooked = true;
-                XposedBridge.log(TAG + ": Hooked " + name + ".removeTask/cleanUpRemovedTaskLocked ✓");
-                break; // only one of the two exists in a given ROM
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + ": hook " + name + " task-removal FAILED: " + t.getMessage());
-            }
-        }
-        if (!hooked) XposedBridge.log(TAG + ": hookTaskRemovedFromRecents: no supervisor class found");
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // ── Option A: "is this package protected?" = "does it have a Recents card?" ──
-    //
-    // No custom list at all. At check time (system_server's 5-min excessive-CPU
-    // audit, CHECK_EXCESSIVE_POWER_USE_MSG → checkExcessivePowerUsage → this hook),
-    // walk the system's LIVE recents list and see if any task belongs to the package.
-    //
-    //   lifecycle (all owned by the system, nothing for us to maintain):
-    //     app opened / resumed      → recents add(Task)   → card exists → protected
-    //     user swipes card / Clear all → recents remove(Task) → card gone → can die
-    //     recents cap trim (48, ActivityManager.getMaxRecentTasksStatic)
-    //                               → oldest tasks silently dropped → can die
-    //     reboot                    → recents persisted to disk & restored → protection survives
-    //
-    // verified field paths (android-14.0.0_r1):
-    //   ActivityManagerService.mActivityTaskManager      AMS.java:1535  (public ATMS)
-    //   ActivityTaskManagerService.mRecentTasks          ATMS.java:442  (private RecentTasks)
-    //   RecentTasks.mTasks                               RT.java:181    (private final ArrayList<Task>)
-    //   Task.getBaseIntent()                             Task.java:1324
-    //   AOSP's own package extraction: task.getBaseIntent().getComponent().getPackageName()
-    //     (same pattern at RecentTasks.java:1854-1856)
-    //
-    // cost: ≤48 elements, ~µs each, once per 5 minutes ≈ negligible (measured
-    // against the surrounding audit which iterates every app process). No locks
-    // taken, no binder, no I/O → cannot stall the system_server thread.
-    //
-    // failure mode: if any reflection step fails (OEM ROM drift), log ONCE and
-    // return false → fail-open (nothing protected, system free to kill), the
-    // safe direction for this module. A repeated failure every 5 min does not
-    // spam the log thanks to the once-guard.
-    // ═══════════════════════════════════════════════════════════════════════
 
     // cached reflection handles — system_server is a long-lived process, the
     // RecentTasks instance is created once at boot and never replaced
@@ -554,13 +330,14 @@ public class MainHook implements IXposedHookLoadPackage {
             java.util.ArrayList<Object> tasks =
                     (java.util.ArrayList<Object>) sTasksField.get(sRecentTasks);
             if (tasks == null) return java.util.Collections.emptySet();
-            for (int i = 0; i < tasks.size(); i++) {
-                Object task = tasks.get(i);
+            for (Object task: tasks){
                 if (task == null) continue;
                 try {
                     Intent baseIntent = (Intent) XposedHelpers.callMethod(task, "getBaseIntent");
                     if (baseIntent == null || baseIntent.getComponent() == null) continue;
-                    pkgs.add(baseIntent.getComponent().getPackageName());
+                    String pkgName = baseIntent.getComponent().getPackageName();
+                    pkgs.add(pkgName);
+                    XposedBridge.log(TAG + ": buildRecentsSnapshot : " + pkgName);
                 } catch (Throwable perTask) {
                     // one weird task must not break the whole snapshot
                 }
@@ -605,226 +382,6 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": resolveRecents failed: " + t);
             return false;
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // ── OLD event-driven impl (Option A predecessor) — kept for rollback ──
-    // hookAppResumed / hookTaskRemovedFromRecents / unprotectTaskArg below are
-    // NO LONGER CALLED (see handleLoadPackage). Their call sites and the
-    // ProtectedApps check in checkExcessivePowerUsageLPr are commented out.
-    // ProtectedApps.java / KeepAliveConfig.java are untouched dead code.
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /** Extract package from the Task/TaskRecord arg (first param of both methods) and unprotect it. */
-    private void unprotectTaskArg(Object[] args) {
-        try {
-            if (args == null || args.length == 0 || args[0] == null) return;
-            Object task = args[0];
-            Intent baseIntent = (Intent) XposedHelpers.callMethod(task, "getBaseIntent");
-            if (baseIntent == null || baseIntent.getComponent() == null) return;
-            String pkg = baseIntent.getComponent().getPackageName();
-            if (pkg == null || pkg.isEmpty()) return;
-            ProtectedApps.remove(pkg);
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": unprotectTaskArg FAILED: " + t.getMessage());
-        }
-    }
-
-    /** Best-effort: is this ActivityRecord the home/launcher task? */
-    private boolean isHomeTask(Object activityRecord) {
-        try {
-            // ConfigurationContainer.getActivityType(): ACTIVITY_TYPE_HOME == 2,
-            // available on both 11 (via WindowContainer) and 12+ (via Fragment)
-            Object type = XposedHelpers.callMethod(activityRecord, "getActivityType");
-            return type instanceof Integer && (Integer) type == 2;
-        } catch (Throwable t) {
-            return false; // can't tell → don't exclude
-        }
-    }
-
-    // ── Hook B: every message that becomes a notification ─────────────
-    private void hookNotificationManager(ClassLoader cl) {
-        try {
-            // 注意：这里不能调用 callNMS_Reflection 做启动测试。
-            // hookNotificationManager 在 handleLoadPackage("android") 里被调用，
-            // 时机早于 NotificationManagerService 注册 "notification" binder，
-            // 此时永远拿不到 binder（不是反射的问题，是服务还没启动）。
-
-            // beforeHookedMethod on enqueueNotificationInternal, get into this method, will get NMS notification lock,
-            //
-            /*
-            T0: 系统线程进入 enqueueNotificationInternal，获取 mNotificationLock
-            T1: 系统线程执行到 beforeHookedMethod（hook 注入点）
-            T2: hook 里 getWorker().post(...) 把任务丢给 worker
-            T3: beforeHookedMethod 返回
-            T4: 系统线程继续执行 enqueueNotificationInternal 方法体（仍然持有 mNotificationLock）
-                   ↑ 这中间可能有耗时操作，锁一直没释放
-            T5: worker 线程被唤醒，执行 wakeScreen → pm.isInteractive()
-                   ↑ 此时 NMS 锁可能还持有！
-            T6: worker 线程持有"逻辑上的 NMS 锁等待"关系 → 等待 PMS 锁
-
-
-            注意：beforeHookedMethod 是 Xposed 在原方法真正开始执行之前调用的。但 Xposed 的 hook 注入点通常是在方法入口，此时如果原方法是 synchronized 的，锁已经获取了（因为 synchronized 是方法级别的，锁在方法入口就拿了）。beforeHookedMethod 返回后，原方法的方法体才开始执行，锁一直持有到方法体结束。
-            所以：worker 线程完全可能在一个“NMS 锁仍被系统线程持有”的时间窗口内去调用 isInteractive()。
-            post 到 worker 解决的是“在 hook 线程上阻塞”的问题，但它没有解决“在 NMS 锁被持有的期间，另一个线程发起 PMS Binder 调用”的问题。
-
-锁的死锁条件不是“同一个线程同时持有两把锁”，而是：
-
-线程 A（系统线程）持有 NMS 锁
-
-线程 B（worker 线程）调用 PMS，PMS 内部需要 PMS 锁
-
-某个线程 C 持有 PMS 锁，并且需要 NMS 锁
-
-只要这三个条件在时间上重叠，就会死锁。worker 线程的 isInteractive() 调用和系统线程持有 NMS 锁的时间窗口重叠，就构成条件。
-
-callNMS_Reflection 调用 nms_obj.notify(...)，这会重新进入 NMS。虽然 pkg=="android" 的守卫阻止了递归，但 notify 本身会尝试获取 NMS 锁。此时 worker 线程：
-
- 持有 NMS 锁 -> 持有 PMS 锁（isInteractive 返回后可能还没释放？） → 尝试获取 NMS 锁
-或者反过来。这直接构成 worker 线程和系统线程之间的锁循环。
-
-真正安全的做法
-要让 worker 线程的 PMS 调用永远不会和 NMS 锁重叠，只有两条路：
-
-不在 beforeHookedMethod 里做任何事，只记录，让 worker 异步执行——但如上所述，worker 仍可能和系统线程重叠，只是概率低。这不是根本解法。
-
-在 afterHookedMethod 里 post。此时 enqueueNotificationInternal 已经返回，NMS 锁已经释放。这是根本解法：
-
-afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经退出，NMS 锁已释放。worker 线程执行 isInteractive() 时，系统里没有任何线程因为这次 NMS 调用而持有 NMS 锁，锁循环的其中一条边被切断。
-
-             */
-
-
-            XposedHelpers.findAndHookMethod(
-        "com.android.server.notification.NotificationManagerService", // 类名
-                cl,
-        "enqueueNotificationInternal",
-        // 按顺序声明 9 个参数的类型
-                String.class,   // pkg
-                String.class,   // opPkg
-                int.class,      // callingUid
-                int.class,      // callingPid
-                String.class,   // tag
-                int.class,      // id
-                Notification.class, // notification
-                int.class,      // incomingUserId
-                boolean.class,  // postSilently (9 参数版特有)
-                new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    try{
-                    /* android 14.0
-                   8-params,
-                   void enqueueNotificationInternal(final String pkg, final String opPkg, final int callingUid, final int callingPid, final String tag, final int id,
-                                final Notification notification, int incomingUserId)
-                   9-params,
-                   void enqueueNotificationInternal(final String pkg, final String opPkg, final int callingUid, final int callingPid,
-                        final String tag, final int id, final Notification notification, int incomingUserId, boolean postSilently)
-
-                   10-params,
-                   private boolean enqueueNotificationInternal(final String pkg, final String opPkg, final int callingUid, final int callingPid, final String tag,
-                        final int id, final Notification notification, int incomingUserId, boolean postSilently, PostNotificationTracker tracker)
-                    */
-                    String pkg = (String) param.args[0];
-                    String tag = (String) param.args[4];
-                    final Notification n = (Notification) param.args[6]; // 立即提取
-
-                    if (pkg.equals("com.android.vending")) return;
-                    if (pkg.equals("android")) return;
-                    if (pkg.equals("com.brave.browser")) return;
-                    if (pkg.equals("com.kimcy929.secretvideorecorder")) return;
-
-                    // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
-                    if ("fcm_intercept".equals(param.args[4])) return;
-
-                    final String fPkg = pkg;
-                    final String fTag = tag;
-
-                    getWorker().postDelayed(new Runnable() {
-                        @Override public void run() {
-                            if (!isMessageNotification(n)) return;
-
-//                    XposedBridge.log(TAG + ": NMS " + pkg);
-
-//                            callNMS_Reflection(fPkg, fTag, cl);
-
-                            // AMS call PMS or NMS call PMS may cause deadlock
-                            // afterHookedMethod enqueueNotificationInternel, the after still may have NMS and PMS waiting to light up screen in other thread
-                            // but XposedHelpers.callMethod(pms_obj, "isInteractive"); here will get PMS's mLock, it may cause deadlock, add a dealy time, and use screen_on/off event instead of inInteractive
-
-                            wakeScreen("pkg: " + fPkg + ", tag: " + fTag, cl);
-                        }
-                    }, WAKE_POST_DELAY_MS);
-                    } catch (Throwable t) {
-                        XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t);
-                    }
-                }
-            }
-            );
-        } catch (Throwable t) {
-            XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t);
-        }
-    }
-
-    private void wakeScreen(final String source, final ClassLoader cl) {
-        // Fix 3 (restored): thread-guard — if we are not on the AppAliveWorker
-        // thread, re-post ourselves there and return immediately. No IPC /
-        // wakeUp may ever run on a system_server hook thread
-        // (android.display / binder).
-        if (!"AppAliveWorker".equals(Thread.currentThread().getName())) {
-            final String fSource = source;
-            getWorker().postDelayed(new Runnable() {
-                @Override public void run() { wakeScreen(fSource, cl); }
-            }, WAKE_POST_DELAY_MS);
-            return;
-        }
-        if (sSystemContext == null) return;
-        long now = SystemClock.elapsedRealtime();
-        if (now - lastWake < 3000) return;                 // IMPORTANT: both hooks fire for one message
-        lastWake = now;
-
-        // Fix 4 (fix #1)：用广播缓存判断屏幕状态，通知路径上零 PMS binder 事务。
-        // isInteractive() 属于同步 binder 调用（进入 PowerManagerService 需拿
-        // PMS 内部锁），是锁循环 → Watchdog → reboot 风险的根源，已彻底移除。
-        if (!sScreenStateReceiverRegistered) {
-            initWorker(); // 惰性重试注册（含 sticky 回放，注册即得到初值）
-        }
-        Boolean interactive = sScreenInteractive;
-        if (interactive == null) {
-            // 状态未知（接收器尚未注册成功/尚未回放）：跳过本次唤醒。
-            // 宁可不亮屏也不在通知路径上发起任何 PMS 调用。
-            XposedBridge.log(TAG + ": screen state unknown, skip wake (" + source + ")");
-            return;
-        }
-        if (interactive) return; // 屏幕已亮，无需唤醒
-
-        try {
-            PowerManager pms_obj = spm;
-            if (pms_obj == null) {
-                pms_obj = getSystemPowerManager(cl);
-                if (pms_obj == null) {
-                    XposedBridge.log(TAG + ": PowerManager got failed, skip wake up screen");
-                    return;
-                }
-                spm = pms_obj;
-            }
-
-            // Fix 4 (fix #3)：WakeLock 只创建一次并缓存。newWakeLock() 本身
-            // 不发起 binder 事务，但每次 new 都会在 framework 侧新建对象并
-            // 增加锁对象数量；acquire(timeout) 的超时机制保证即使代码异常
-            // 路径漏掉 release()，系统也会在 5s 后自动回收该锁。
-            if (sWakeLock == null) {
-                sWakeLock = pms_obj.newWakeLock(
-                        PowerManager.FULL_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                        "AppAlive:WakeScreen");
-            }
-
-            XposedBridge.log(TAG + ": wake up screen by " + source);
-            // Acquire with a timeout to be safe
-            sWakeLock.acquire(5000); // 5 seconds
-        } catch (Throwable t) {
-            XposedBridge.log("wakeScreen failed: " + t);
         }
     }
 
@@ -874,18 +431,8 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
                                             Thread.sleep(5000);
                                         } catch (InterruptedException ignored) {
                                         }
-                                        callNMS_Reflection("Boot test", "NMS reflection OK after boot", cl);
                                     }
                                 }, "AppAliveBootTest").start();
-
-
-                                // Fix 4：启动时即初始化 worker 线程并注册屏幕状态广播接收器。
-                                // handleLoadPackage("android") 运行于 SystemServer 极早期（AMS 未起、
-                                // ActivityManager 未 ready），不能在当前线程直接 registerReceiver；
-                                // post 到 worker 线程延后执行。失败时 wakeScreen 会惰性重试。
-//                                getWorker().post(new Runnable() {
-//                                    @Override public void run() { initWorker(); }
-//                                });
                         } catch (Throwable t) {
                             XposedBridge.log(TAG + ": Hooked finishBooting failed: " + t);
                         }
@@ -894,134 +441,6 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
             XposedBridge.log(TAG + ": Hooked finishBooting ✓");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": Hooked finishBooting failed: " + t);
-        }
-    }
-
-    private void callNMS_Reflection(String title, String content, ClassLoader cl) {
-        try {
-            if (nms==null) return;
-
-            // 关键修复：不要用 sSystemContext.getSystemService(NOTIFICATION_SERVICE)。
-            // 当 "notification" 服务尚未注册时它返回的 NotificationManager.mService 为 null
-            // （且坏实例可能被 SystemServiceRegistry 缓存），createNotificationChannel 会 NPE。
-            // 改用 getSystemNotificationManager 现取 binder（结果缓存到 sNms，见字段注释）。
-            NotificationManager nms_obj = sNms;
-            if (nms_obj == null) {
-                nms_obj = getSystemNotificationManager(cl);
-                if (nms_obj == null) {
-                    XposedBridge.log(TAG + ": NMS binder not ready, skip notification");
-                    return;
-                }
-                sNms = nms_obj;
-            }
-
-            long ident = Binder.clearCallingIdentity();
-            try {
-                // register channel first (public, 2-param)
-                NotificationChannel ch = new NotificationChannel("fcm_intercept_channel",
-                        "FCM Intercept", NotificationManager.IMPORTANCE_HIGH);
-                nms_obj.createNotificationChannel(ch);
-
-                Notification notification = new Notification.Builder(sSystemContext, "fcm_intercept_channel")
-                        .setSmallIcon(android.R.drawable.ic_dialog_info)
-                        .setContentTitle(title)
-                        .setContentText(content)
-                        .setAutoCancel(true)
-                        .setCategory(Notification.CATEGORY_MESSAGE)
-                        .setPriority(Notification.PRIORITY_HIGH)
-                        .build();
-
-                // int notificationId = (int) (System.currentTimeMillis() % Integer.MAX_VALUE);
-                notificationId = (notificationId + 1) & 0x7FFFFFFF;   // static field, replaces previous card
-                nms_obj.notify("fcm_intercept", notificationId, notification);
-
-            } finally {
-                Binder.restoreCallingIdentity(ident);
-            }
-            // XposedBridge.log(TAG + ": NMS call succeeded ✅");
-        } catch (Throwable t) {
-            sNms = null; // 调用失败（如 binder 死亡），丢弃缓存，下次重新获取
-            XposedBridge.log(TAG + ": Reflection call failed: " + t);
-        }
-    }
-
-    private NotificationManager getSystemNotificationManager(ClassLoader cl) {
-        // 兜底：boot 完成后 SystemServiceRegistry 里的 service 已经是可用的了
-        try {
-            if (sSystemContext == null) return null;
-            Object nm = sSystemContext.getSystemService(Context.NOTIFICATION_SERVICE);
-            if (nm instanceof NotificationManager) {
-                XposedBridge.log(TAG + ": Got system NotificationManager via getSystemService ✅");
-                return (NotificationManager) nm;
-            }
-        } catch (Throwable t2) {
-            XposedBridge.log(TAG + ": getSystemNotificationManager failed: " + t2);
-        }
-        return null;
-    }
-
-    private PowerManager getSystemPowerManager(ClassLoader cl) {
-        try {
-            if (sSystemContext == null) return null;
-            Object pm = sSystemContext.getSystemService(Context.POWER_SERVICE);
-            if (pm instanceof PowerManager) {
-                XposedBridge.log(TAG + ": Got PowerManager via getSystemService ✅");
-                return (PowerManager) pm;
-            }
-        } catch (Throwable t2) {
-            XposedBridge.log(TAG + ": get PowerManager failed: " + t2);
-        }
-        return null;
-    }
-
-    private boolean isMessageNotification(Notification n) {
-        if (n == null) return false;
-        if (Notification.CATEGORY_MESSAGE.equals(n.category)) return true;
-        if (hasMessagingStyle(n)) {
-            return true;
-        }
-
-        if (n.extras == null) return false;
-
-        CharSequence text = n.extras.getCharSequence(Notification.EXTRA_TEXT);
-        if (text == null) {
-            return false; // 没有文字内容，不太可能是消息
-        }
-
-        boolean isOngoing = (n.flags & Notification.FLAG_ONGOING_EVENT) != 0;
-        boolean isGroupSummary = (n.flags & Notification.FLAG_GROUP_SUMMARY) != 0;
-
-        if (isOngoing || isGroupSummary) {
-            return false;
-        }
-
-        // 有标题 && 有内容文本 => 大概率是消息
-        boolean hasTitle = n.extras.getCharSequence(Notification.EXTRA_TITLE) != null;
-        return hasTitle;
-
-//        return n.extras.getCharSequence(Notification.EXTRA_TEXT) != null
-//                && (n.flags & Notification.FLAG_ONGOING_EVENT) == 0
-//                && (n.flags & Notification.FLAG_GROUP_SUMMARY) == 0;
-    }
-
-    private boolean hasMessagingStyle(Notification n) {
-        try {
-            // 方法1：通过 Class.forName（不依赖 Xposed）
-            Class<?> styleClass = Class.forName("android.app.Notification$MessagingStyle");
-            Method extractMethod = styleClass.getMethod(
-                    "extractMessagingStyleFromNotification",
-                    Notification.class
-            );
-            Object result = extractMethod.invoke(null, n);
-            return result != null;
-
-        } catch (ClassNotFoundException e) {
-            // Android 10 以下没有这个类
-            return false;
-        } catch (NoSuchMethodException e) {
-            return false;
-        } catch (Throwable t) {
-            return false;
         }
     }
 }
