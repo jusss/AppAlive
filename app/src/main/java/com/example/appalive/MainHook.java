@@ -153,7 +153,7 @@ public class MainHook implements IXposedHookLoadPackage {
         // -> Settings.Secure.getIntForUser,
 
 
-        // soft restart to apply changes, adb shell; stop; start;   will restart system_server
+        // soft restart to apply changes, adb shell; su; stop; start;   will restart system_server
 
         hookPulseOnNotification(lpparam);
 //        hookBootComplete(lpparam.classLoader);
@@ -218,6 +218,10 @@ public class MainHook implements IXposedHookLoadPackage {
 
             boolean isSystemServer = "android".equals(lpp.packageName);
             boolean isSystemUI     = "com.android.systemui".equals(lpp.packageName);
+
+            XposedBridge.log(TAG + ": isSystemUI is " + isSystemUI);
+
+
             if (!isSystemServer && !isSystemUI) return;
 
             // ① THE fix: give it a doze component (also makes ambientDisplayAvailable() true)
@@ -252,6 +256,8 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedHelpers.findAndHookMethod(
                         "com.android.systemui.statusbar.phone.DozeServiceHost", lpp.classLoader,
                         "isAlwaysOnSuppressed", XC_MethodReplacement.returnConstant(false));
+
+                XposedBridge.log(TAG + ": hook isSystemUI ok");
             }
 
             XposedBridge.log(TAG + ": Hooked PulseOnNotification ✓");
