@@ -78,7 +78,6 @@ public class MainHook implements IXposedHookLoadPackage {
     private static Handler sWorkerHandler = null;
     private static final Object sWorkerHandlerLock = new Object();
 
-    private static volatile PowerManager spm = null;
 
     // ── Fix 4: cached screen state (fix #1) ─────────────────────────────────
     // WakeScreen 最大的 reboot 风险不在异常，而在时序：worker 线程同步调用
@@ -99,11 +98,15 @@ public class MainHook implements IXposedHookLoadPackage {
     // afterHookedMethod 时 NMS 锁虽已释放，但系统侧还有 buzzBeepBlinkLight、
     // ranking 回调等后续工作可能在别的系统线程里短暂持有 NMS 锁；延迟 1s
     // 让 worker 的 PMS 事务（若有）几乎不可能与任何 NMS 持锁窗口重叠。
-    private static final long WAKE_POST_DELAY_MS = 1000;
+    private static final long WAKE_POST_DELAY_MS = 1600;
 
     // fix #3：唤醒锁只创建一次，进程生命周期内复用。
     // 注意：使用方必须总是 acquire(timeout)，超时回收兜底，无需手动 release。
     private static volatile PowerManager.WakeLock sWakeLock = null;
+
+    private static final Object wakeUpLock = new Object();
+
+
 
     private static void initWorker() {
         getWorker(); // 惰性创建 AppAliveWorker HandlerThread
@@ -285,7 +288,7 @@ public class MainHook implements IXposedHookLoadPackage {
         // 此时代码运行在系统启动早期，"notification" 服务尚未注册，
         // 拿到的 NotificationManager.mService 为 null，createNotificationChannel 会 NPE。
 
-//        hookNotificationManager(lpparam.classLoader);
+        hookNotificationManager(lpparam.classLoader);
         // hook NMS, and call PMS will get deadlock, this is the wrong way
         // so I wonder what's the notification chain, new notification -> wake up -> make sound, I could call PMS in the end of the chain
         // then I search how to trigger notification tone, then I find DozeTriggers.onNotification,
@@ -293,11 +296,11 @@ public class MainHook implements IXposedHookLoadPackage {
         // the reason that notification will not wake screen, may be ROM disabled pulseOnNotificationEnabled
         // -> Settings.Secure.getIntForUser,
 
-        hookPulseOnNotification(lpparam.classLoader);
-//        hookBootComplete(lpparam.classLoader);
+//        hookPulseOnNotification(lpparam);
+        hookBootComplete(lpparam.classLoader);
     }
 
-    private void hookPulseOnNotification(ClassLoader cl) {
+    private void hookPulseOnNotification(XC_LoadPackage.LoadPackageParam lpp) {
         try {
             /*
             Settings.Secure 和 AmbientDisplayConfiguration 都在 framework（android）和 SystemUI（com.android.systemui）中都有使用
@@ -336,19 +339,63 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             );
 
-            */
 
             XposedHelpers.findAndHookMethod(
-    "com.android.systemui.doze.DozeHost",
-    cl,
-    "isAlwaysOnSuppressed",
-    new XC_MethodReplacement() {
-        @Override
-        protected Object replaceHookedMethod(MethodHookParam param) {
-            return false; // 强制认为 AOD 没有被压制
-        }
-    }
-);
+                    "com.android.systemui.doze.DozeHost",
+                    cl,
+                    "isAlwaysOnSuppressed",
+                    new XC_MethodReplacement() {
+                        @Override
+                        protected Object replaceHookedMethod(MethodHookParam param) {
+                            return false; // 强制认为 AOD 没有被压制
+                        }
+                    }
+            );
+
+            */
+
+
+
+                final String DOZE_COMPONENT =
+                        "com.android.systemui/com.android.systemui.doze.DozeService";
+
+                    boolean isSystemServer = "android".equals(lpp.packageName);
+                    boolean isSystemUI     = "com.android.systemui".equals(lpp.packageName);
+                    if (!isSystemServer && !isSystemUI) return;
+
+                    // ① THE fix: give it a doze component (also makes ambientDisplayAvailable() true)
+                    XposedHelpers.findAndHookMethod(
+                            "android.hardware.display.AmbientDisplayConfiguration", lpp.classLoader,
+                            "ambientDisplayComponent",
+                            XC_MethodReplacement.returnConstant(DOZE_COMPONENT));
+
+                    // ② Kill switch used by SystemUI's shouldHeadsUpWhenDozing AND by
+                    //    DreamManagerService.getDozeComponent() via enabled()
+                    XposedHelpers.findAndHookMethod(
+                            "android.hardware.display.AmbientDisplayConfiguration", lpp.classLoader,
+                            "pulseOnNotificationEnabled", int.class,
+                            XC_MethodReplacement.returnConstant(true));
+
+                    // Deliberately NOT touching alwaysOnEnabled() → no full AOD, pulses only.
+
+                    if (isSystemUI) {
+                        // ③ Now-reachable DozeTriggers: neutralize sWakeDisplaySensorState + isAlwaysOnSuppressed
+                        Class<?> dt = XposedHelpers.findClass(
+                                "com.android.systemui.doze.DozeTriggers", lpp.classLoader);
+                        XposedHelpers.findAndHookMethod(dt, "onNotification", Runnable.class,
+                                new XC_MethodReplacement() {
+                                    @Override
+                                    protected Object replaceHookedMethod(MethodHookParam param) {
+                                        XposedHelpers.setStaticBooleanField(dt, "sWakeDisplaySensorState", true);
+                                        XposedHelpers.callMethod(param.thisObject, "requestPulse",
+                                                1 /* PULSE_REASON_NOTIFICATION */, false, param.args[0]);
+                                        return null;
+                                    }
+                                });
+                        XposedHelpers.findAndHookMethod(
+                                "com.android.systemui.statusbar.phone.DozeServiceHost", lpp.classLoader,
+                                "isAlwaysOnSuppressed", XC_MethodReplacement.returnConstant(false));
+                    }
 
 
         } catch (Throwable t) {
@@ -697,23 +744,23 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
 
 
             XposedHelpers.findAndHookMethod(
-        "com.android.server.notification.NotificationManagerService", // 类名
-                cl,
-        "enqueueNotificationInternal",
-        // 按顺序声明 9 个参数的类型
-                String.class,   // pkg
-                String.class,   // opPkg
-                int.class,      // callingUid
-                int.class,      // callingPid
-                String.class,   // tag
-                int.class,      // id
-                Notification.class, // notification
-                int.class,      // incomingUserId
-                boolean.class,  // postSilently (9 参数版特有)
-                new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    try{
+                    "com.android.server.notification.NotificationManagerService", // 类名
+                    cl,
+                    "enqueueNotificationInternal",
+                    // 按顺序声明 9 个参数的类型
+                    String.class,   // pkg
+                    String.class,   // opPkg
+                    int.class,      // callingUid
+                    int.class,      // callingPid
+                    String.class,   // tag
+                    int.class,      // id
+                    Notification.class, // notification
+                    int.class,      // incomingUserId
+                    boolean.class,  // postSilently (9 参数版特有)
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try{
                     /* android 14.0
                    8-params,
                    void enqueueNotificationInternal(final String pkg, final String opPkg, final int callingUid, final int callingPid, final String tag, final int id,
@@ -726,41 +773,41 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
                    private boolean enqueueNotificationInternal(final String pkg, final String opPkg, final int callingUid, final int callingPid, final String tag,
                         final int id, final Notification notification, int incomingUserId, boolean postSilently, PostNotificationTracker tracker)
                     */
-                    String pkg = (String) param.args[0];
-                    String tag = (String) param.args[4];
-                    final Notification n = (Notification) param.args[6]; // 立即提取
+                                String pkg = (String) param.args[0];
+                                String tag = (String) param.args[4];
+                                final Notification n = (Notification) param.args[6]; // 立即提取
 
-                    if (pkg.equals("com.android.vending")) return;
-                    if (pkg.equals("android")) return;
-                    if (pkg.equals("com.brave.browser")) return;
-                    if (pkg.equals("com.kimcy929.secretvideorecorder")) return;
+                                if (pkg.equals("com.android.vending")) return;
+                                if (pkg.equals("android")) return;
+                                if (pkg.equals("com.brave.browser")) return;
+                                if (pkg.equals("com.kimcy929.secretvideorecorder")) return;
 
-                    // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
-                    if ("fcm_intercept".equals(param.args[4])) return;
+                                // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
+                                if ("fcm_intercept".equals(param.args[4])) return;
 
-                    final String fPkg = pkg;
-                    final String fTag = tag;
+                                final String fPkg = pkg;
+                                final String fTag = tag;
 
-                    getWorker().postDelayed(new Runnable() {
-                        @Override public void run() {
-                            if (!isMessageNotification(n)) return;
+                                getWorker().postDelayed(new Runnable() {
+                                    @Override public void run() {
+                                        if (!isMessageNotification(n)) return;
 
 //                    XposedBridge.log(TAG + ": NMS " + pkg);
 
 //                            callNMS_Reflection(fPkg, fTag, cl);
 
-                            // AMS call PMS or NMS call PMS may cause deadlock
-                            // afterHookedMethod enqueueNotificationInternel, the after still may have NMS and PMS waiting to light up screen in other thread
-                            // but XposedHelpers.callMethod(pms_obj, "isInteractive"); here will get PMS's mLock, it may cause deadlock, add a dealy time, and use screen_on/off event instead of inInteractive
+                                        // AMS call PMS or NMS call PMS may cause deadlock
+                                        // afterHookedMethod enqueueNotificationInternel, the after still may have NMS and PMS waiting to light up screen in other thread
+                                        // but XposedHelpers.callMethod(pms_obj, "isInteractive"); here will get PMS's mLock, it may cause deadlock, add a dealy time, and use screen_on/off event instead of inInteractive
 
-                            wakeScreen("pkg: " + fPkg + ", tag: " + fTag, cl);
+                                        wakeScreen("pkg: " + fPkg + ", tag: " + fTag, cl);
+                                    }
+                                }, WAKE_POST_DELAY_MS);
+                            } catch (Throwable t) {
+                                XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t);
+                            }
                         }
-                    }, WAKE_POST_DELAY_MS);
-                    } catch (Throwable t) {
-                        XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t);
                     }
-                }
-            }
             );
         } catch (Throwable t) {
             XposedBridge.log("Hooked enqueueNotificationInternal failed: " + t);
@@ -800,29 +847,25 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
         if (interactive) return; // 屏幕已亮，无需唤醒
 
         try {
-            PowerManager pms_obj = spm;
-            if (pms_obj == null) {
-                pms_obj = getSystemPowerManager(cl);
-                if (pms_obj == null) {
-                    XposedBridge.log(TAG + ": PowerManager got failed, skip wake up screen");
-                    return;
+
+            synchronized (wakeUpLock) {
+
+                if (sWakeLock == null) {
+                    PowerManager pm = getSystemPowerManager(cl);
+                    if (pm == null) return;
+                    sWakeLock = pm.newWakeLock(
+                            PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                            "AppAlive:WakeScreen");
+                    sWakeLock.setReferenceCounted(false); // 避免多次 acquire 计数叠加
+
                 }
-                spm = pms_obj;
+
+                XposedBridge.log(TAG + ": wake up screen by " + source);
+                if (!sWakeLock.isHeld()) {
+                    sWakeLock.acquire(5000);
+                }
             }
 
-            // Fix 4 (fix #3)：WakeLock 只创建一次并缓存。newWakeLock() 本身
-            // 不发起 binder 事务，但每次 new 都会在 framework 侧新建对象并
-            // 增加锁对象数量；acquire(timeout) 的超时机制保证即使代码异常
-            // 路径漏掉 release()，系统也会在 5s 后自动回收该锁。
-            if (sWakeLock == null) {
-                sWakeLock = pms_obj.newWakeLock(
-                        PowerManager.FULL_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                        "AppAlive:WakeScreen");
-            }
-
-            XposedBridge.log(TAG + ": wake up screen by " + source);
-            // Acquire with a timeout to be safe
-            sWakeLock.acquire(5000); // 5 seconds
         } catch (Throwable t) {
             XposedBridge.log("wakeScreen failed: " + t);
         }
@@ -886,9 +929,9 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
 //                                getWorker().post(new Runnable() {
 //                                    @Override public void run() { initWorker(); }
 //                                });
-                        } catch (Throwable t) {
-                            XposedBridge.log(TAG + ": Hooked finishBooting failed: " + t);
-                        }
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + ": Hooked finishBooting failed: " + t);
+                            }
                         }
                     });
             XposedBridge.log(TAG + ": Hooked finishBooting ✓");
