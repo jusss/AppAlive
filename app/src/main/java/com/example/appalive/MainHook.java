@@ -147,13 +147,14 @@ public class MainHook implements IXposedHookLoadPackage {
                                                 String packageName = (String) XposedHelpers.getObjectField(info, "packageName");
                                                 // dynamic list: added on app resume, removed when task swiped away in recents
                                                 // (seeded at boot from KeepAliveConfig). see ProtectedApps.
+                                                XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr check: " + packageName);
                                                 if (ProtectedApps.contains(packageName)) {
                                                     XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr skip: " + packageName);
                                                     param.setResult(false);
                                                 }
                                             }
                                             // debug
-                                            ProtectedApps.dump();
+//                                            ProtectedApps.dump();
                                         } catch (Throwable t) {
                                             XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr FAILED: " + t.getMessage());
                                         }
