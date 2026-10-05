@@ -773,7 +773,10 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
                    private boolean enqueueNotificationInternal(final String pkg, final String opPkg, final int callingUid, final int callingPid, final String tag,
                         final int id, final Notification notification, int incomingUserId, boolean postSilently, PostNotificationTracker tracker)
                     */
+                                if (param == null) return;
+                                if (param.args.length < 6) return;
                                 String pkg = (String) param.args[0];
+                                if (pkg == null) return;
                                 String tag = (String) param.args[4];
                                 final Notification n = (Notification) param.args[6]; // 立即提取
 
@@ -781,6 +784,11 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
                                 if (pkg.equals("android")) return;
                                 if (pkg.equals("com.brave.browser")) return;
                                 if (pkg.equals("com.kimcy929.secretvideorecorder")) return;
+                                if (pkg.equals("com.android.bluetooth")) return;
+                                if (pkg.equals("com.android.bluetooth.bthelper")) return;
+                                if (pkg.equals("com.android.bluetoothmidiservice")) return;
+
+                                if (pkg.startsWith("com.android.")) return;
 
                                 // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
                                 if ("fcm_intercept".equals(param.args[4])) return;
