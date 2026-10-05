@@ -426,7 +426,13 @@ afterHookedMethod 在原方法返回之后调用，此时 synchronized 块已经
                     if (pkg.equals("com.brave.browser")) return;
                     if (pkg.equals("com.kimcy929.secretvideorecorder")) return;
 
-                    // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
+                    if (pkg.equals("com.android.bluetooth")) return;
+                    if (pkg.equals("com.android.bluetooth.bthelper")) return;
+                    if (pkg.equals("com.android.bluetoothmidiservice")) return;
+                    if (pkg.startsWith("com.android.")) return;
+
+
+                        // 防重入：跳过我们自己投递的拦截通知（tag 位于 args[4]，9/10 参数签名位置一致）
                     if ("fcm_intercept".equals(param.args[4])) return;
 
                     final String fPkg = pkg;
