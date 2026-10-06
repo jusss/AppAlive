@@ -30,9 +30,10 @@ public final class ProtectedApps {
     private static final String TAG = "AppAlive";
 
     private static final Set<String> sPackages = ConcurrentHashMap.newKeySet();
+    private static final Set<String> rPackages = ConcurrentHashMap.newKeySet();
 
     // set false if you want to load package list from KeepAliveConfig
-    private static volatile boolean sSeeded = true;
+    private static volatile boolean sSeeded = false;
 
     private ProtectedApps() {}
 
@@ -41,7 +42,7 @@ public final class ProtectedApps {
         if (sSeeded) return;
         synchronized (ProtectedApps.class) {
             if (sSeeded) return;
-            sPackages.addAll(KeepAliveConfig.get());
+            rPackages.addAll(KeepAliveConfig.get());
             sSeeded = true;
         }
     }
@@ -66,6 +67,15 @@ public final class ProtectedApps {
     public static boolean contains(String packageName) {
         if (packageName == null || packageName.isEmpty()) return false;
         return sPackages.contains(packageName);
+    }
+
+    public static boolean rcontains(String packageName) {
+        if (packageName == null || packageName.isEmpty()) return false;
+        for (String r: rPackages) {
+            if (packageName.startsWith(r,0)) return true;
+        }
+        return false;
+//        return rPackages.contains(packageName);
     }
 
     /** Debug helper: dump current protected set to the Xposed log. */

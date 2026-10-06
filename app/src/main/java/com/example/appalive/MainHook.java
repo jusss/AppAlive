@@ -152,13 +152,35 @@ public class MainHook implements IXposedHookLoadPackage {
                                                     XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr skip: " + packageName);
                                                     param.setResult(false);
                                                 } else {
-                                                    if (packageName.startsWith("com.android.",0)) return;
-                                                    if (packageName.equals("fpq.jzkkguc.st")) return;
-                                                    if (packageName.equals("com.google.android.gm")) return;
-                                                    if (packageName.equals("com.google.android.gms")) return;
-                                                    if (packageName.equals("com.google.android.gsf")) return;
-                                                    if (packageName.equals("com.google.android.apps.messaging")) return;
 
+                                                    if (ProtectedApps.rcontains(packageName)) return;
+
+//                                                    if (packageName.startsWith("com.android.",0)) return;
+//                                                    if (packageName.equals("fpq.jzkkguc.st")) return;
+//                                                    if (packageName.equals("com.google.android.gm")) return;
+//                                                    if (packageName.equals("com.google.android.gms")) return;
+//                                                    if (packageName.equals("com.google.android.gsf")) return;
+//                                                    if (packageName.equals("com.google.android.apps.messaging")) return;
+                                                    /*
+                                                    #cat /data/system/appalive.txt
+                                                     com.android.
+                                                     fpq.jzkkguc.st
+                                                     com.google.android.gm
+                                                     com.google.android.gms
+                                                     com.google.android.gsf
+                                                     com.google.android.apps.messaging
+                                                     com.xiaomi.dolby
+                                                     com.google.android.soundpicker
+                                                     com.mediatek.
+                                                     com.google.android.dialer
+                                                     com.google.android.deskclock
+                                                     android
+                                                     android.ext.services
+                                                     com.google.android.apps.nexuslauncher
+                                                     com.google.android.inputmethod
+                                                     com.google.android.webview
+                                                     system
+                                                     */
                                                     param.setResult(true);
                                                 }
                                             }
