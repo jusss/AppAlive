@@ -151,6 +151,15 @@ public class MainHook implements IXposedHookLoadPackage {
                                                 if (ProtectedApps.contains(packageName)) {
                                                     XposedBridge.log(TAG + ": checkExcessivePowerUsageLPr skip: " + packageName);
                                                     param.setResult(false);
+                                                } else {
+                                                    if (packageName.startsWith("com.android.",0)) return;
+                                                    if (packageName.equals("fpq.jzkkguc.st")) return;
+                                                    if (packageName.equals("com.google.android.gm")) return;
+                                                    if (packageName.equals("com.google.android.gms")) return;
+                                                    if (packageName.equals("com.google.android.gsf")) return;
+                                                    if (packageName.equals("com.google.android.apps.messaging")) return;
+
+                                                    param.setResult(true);
                                                 }
                                             }
                                             // debug
