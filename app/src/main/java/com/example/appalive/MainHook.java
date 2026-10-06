@@ -244,8 +244,8 @@ public class MainHook implements IXposedHookLoadPackage {
         // 此时代码运行在系统启动早期，"notification" 服务尚未注册，
         // 拿到的 NotificationManager.mService 为 null，createNotificationChannel 会 NPE。
 
-        hookNotificationManager(lpparam.classLoader);
-        hookBootComplete(lpparam.classLoader);
+//        hookNotificationManager(lpparam.classLoader);
+//        hookBootComplete(lpparam.classLoader);
     }
 
     // ── Hook C: app came to foreground (started / resumed) → protect it ──
