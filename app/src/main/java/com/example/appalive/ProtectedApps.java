@@ -33,7 +33,7 @@ public final class ProtectedApps {
     private static final Set<String> rPackages = ConcurrentHashMap.newKeySet();
 
     // set false if you want to load package list from KeepAliveConfig
-    private static volatile boolean sSeeded = false;
+    private static volatile boolean sSeeded = true;
 
     private ProtectedApps() {}
 
